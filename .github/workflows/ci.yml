@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.dependencies }} dependencies
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Checks both ends of the declared version ranges.
+        dependencies: [upgrade, downgrade]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub ${{ matrix.dependencies }}
+      - run: dart format --output=none --set-exit-if-changed lib test example
+      - run: flutter analyze
+      - run: flutter test
