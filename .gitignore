@@ -1,0 +1,13 @@
+# Dart / Flutter
+.dart_tool/
+.packages
+build/
+coverage/
+# A library does not commit its lock file; apps resolve their own versions.
+pubspec.lock
+
+# IDEs and OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
