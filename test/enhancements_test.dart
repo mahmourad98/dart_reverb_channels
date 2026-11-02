@@ -1,13 +1,19 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:dart_reverb_channels/testing.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 import 'support.dart';
 
 const String _users = 'private-users.1';
 const String _news = 'news';
+
+ChannelAuthorizationRequest _request() =>
+    ChannelAuthorizationRequest(channel: _users, socketId: '123.456', cancelToken: ReverbCancelToken());
 
 void main() {
   group('connect()', () {
@@ -172,6 +178,59 @@ void main() {
         async.flushMicrotasks();
         expect(done, isTrue);
       });
+    });
+  });
+
+  group('HttpChannelAuthorizer.responseParser', () {
+    final endpoint = Uri.parse('https://api.test/broadcasting/auth');
+
+    HttpChannelAuthorizer authorizer(http.Response response, ChannelAuthorizationResponseParser parser) =>
+        HttpChannelAuthorizer(
+          endpoint: endpoint,
+          responseParser: parser,
+          clientFactory: () => MockClient((http.Request request) async => response),
+        );
+
+    test('reads a response wrapped in an envelope', () async {
+      final authorization = await authorizer(
+        http.Response('{"data":{"auth":"key:signature"}}', 200),
+        (http.Response response) {
+          final envelope = jsonDecode(response.body) as Map<String, dynamic>;
+          return ChannelAuthorization.fromJson((envelope['data'] as Map).cast<String, dynamic>());
+        },
+      ).authorize(_request());
+      expect(authorization.auth, 'key:signature');
+    });
+
+    test('a parser error is a malformed response, which is not retried', () async {
+      final failure = await authorizer(
+        http.Response('{"unexpected":true}', 200),
+        (http.Response response) => throw const FormatException('no auth'),
+      ).authorize(_request()).then<Object?>((_) => null, onError: (Object error) => error);
+      expect(failure, isA<ReverbAuthorizationException>());
+      final error = failure! as ReverbAuthorizationException;
+      expect(error.malformedResponse, isTrue);
+      expect(error.isRetryable, isFalse);
+      expect(error.cause, isA<FormatException>());
+    });
+
+    test('a ReverbAuthorizationException from the parser passes through unchanged', () async {
+      const refusal = ReverbAuthorizationException('Account locked', channel: _users, statusCode: 423);
+      final failure = await authorizer(
+        http.Response('{"locked":true}', 200),
+        (http.Response response) => throw refusal,
+      ).authorize(_request()).then<Object?>((_) => null, onError: (Object error) => error);
+      expect(failure, same(refusal));
+    });
+
+    test('a non-200 response never reaches the parser', () async {
+      var parsed = false;
+      final failure = await authorizer(http.Response('busy', 503), (http.Response response) {
+        parsed = true;
+        return const ChannelAuthorization(auth: 'never');
+      }).authorize(_request()).then<Object?>((_) => null, onError: (Object error) => error);
+      expect(parsed, isFalse);
+      expect((failure! as ReverbAuthorizationException).statusCode, 503);
     });
   });
 }

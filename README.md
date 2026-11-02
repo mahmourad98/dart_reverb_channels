@@ -309,12 +309,28 @@ with a raw JSON object containing a non-empty `auth` string:
 ```
 
 Presence responses also contain `channel_data` (usually a JSON string containing `user_id` and
-`user_info`); encrypted responses require `shared_secret`. Do not wrap the response in your API's
-usual `data` envelope. Headers default to `Accept: application/json` and the body's content type;
-your header builder can override them.
+`user_info`); encrypted responses require `shared_secret`. If your endpoint wraps the response
+(for example in your API's `data` envelope), read it with `responseParser` (below). Headers default
+to `Accept: application/json` and the body's content type; your header builder can override them.
 
 `clientFactory` must return a fresh `http.Client` for each request: the authorizer closes it on
 completion or cancellation. Do not return a shared app-wide client.
+
+`responseParser` reads a 200 response into a `ChannelAuthorization` when the body is not the raw
+object above:
+
+```dart
+HttpChannelAuthorizer(
+  endpoint: Uri.parse('https://api.example.com/broadcasting/auth'),
+  responseParser: (http.Response response) {
+    final envelope = jsonDecode(response.body) as Map<String, dynamic>;
+    return ChannelAuthorization.fromJson(envelope['data'] as Map<String, dynamic>);
+  },
+)
+```
+
+Other statuses never reach the parser. A `ReverbAuthorizationException` thrown by the parser passes
+through unchanged; any other error becomes a malformed response, which is not retried.
 
 #### Using your own HTTP stack (optional)
 

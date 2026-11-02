@@ -15,6 +15,7 @@ export 'src/authorizer.dart'
         ChannelAuthorizationBody,
         ChannelAuthorizationHeadersBuilder,
         ChannelAuthorizationRequest,
+        ChannelAuthorizationResponseParser,
         ChannelAuthorizer,
         HttpChannelAuthorizer;
 export 'src/cancel_token.dart' show ReverbCancelToken;

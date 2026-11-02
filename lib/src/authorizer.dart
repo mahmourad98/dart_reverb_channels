@@ -74,6 +74,15 @@ abstract interface class ChannelAuthorizer {
 typedef ChannelAuthorizationHeadersBuilder =
     FutureOr<Map<String, String>> Function(ChannelAuthorizationRequest request);
 
+/// Reads an authorization endpoint's 200 response into a
+/// [ChannelAuthorization], for endpoints whose body is not the raw
+/// `{"auth": …}` object (for example one wrapped in an API envelope).
+///
+/// Throw to reject the response: a [ReverbAuthorizationException] passes
+/// through unchanged; anything else becomes one marked `malformedResponse`,
+/// which is not retried.
+typedef ChannelAuthorizationResponseParser = FutureOr<ChannelAuthorization> Function(http.Response response);
+
 /// How [HttpChannelAuthorizer] encodes the request body.
 enum ChannelAuthorizationBody {
   /// `application/json`: `{"socket_id": …, "channel_name": …}`.
@@ -84,7 +93,8 @@ enum ChannelAuthorizationBody {
 }
 
 /// The default authorizer: POSTs the socket id and channel name to an endpoint
-/// such as Laravel's `/broadcasting/auth` and reads the raw `{auth}` body.
+/// such as Laravel's `/broadcasting/auth` and reads the raw `{auth}` body, or
+/// whatever [responseParser] reads instead.
 ///
 /// Each request gets its own client from `clientFactory`, closed when the
 /// request ends. Cancellation closes it early, which aborts the request; the
@@ -95,6 +105,7 @@ final class HttpChannelAuthorizer implements ChannelAuthorizer {
     required this.endpoint,
     this.headers,
     this.body = ChannelAuthorizationBody.json,
+    this.responseParser,
     http.Client Function()? clientFactory,
   }) : _clientFactory = clientFactory ?? http.Client.new;
 
@@ -106,6 +117,10 @@ final class HttpChannelAuthorizer implements ChannelAuthorizer {
 
   /// The body encoding.
   final ChannelAuthorizationBody body;
+
+  /// Reads a 200 response. Null reads the raw `{auth, channel_data,
+  /// shared_secret}` body Laravel returns, with [ChannelAuthorization.fromJson].
+  final ChannelAuthorizationResponseParser? responseParser;
 
   final http.Client Function() _clientFactory;
 
@@ -156,9 +171,13 @@ final class HttpChannelAuthorizer implements ChannelAuthorizer {
     }
 
     try {
+      final parser = responseParser;
+      if (parser != null) return await parser(response);
       final decoded = jsonDecode(response.body);
       if (decoded is! Map) throw const FormatException('Authorization response is not a JSON object');
       return ChannelAuthorization.fromJson(decoded.cast<String, dynamic>());
+    } on ReverbAuthorizationException {
+      rethrow;
     } catch (error, stackTrace) {
       throw ReverbAuthorizationException(
         'Authorization response is unreadable',
