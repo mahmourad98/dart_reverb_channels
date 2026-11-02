@@ -67,6 +67,18 @@ final class ReverbSubscription {
     return entry.members[id] ?? PresenceMember(id: id);
   }
 
+  /// Sends a client event (a whisper) on a private or presence channel.
+  ///
+  /// The `client-` prefix is added when missing. Returns false when the
+  /// channel is not subscribed right now. Throws [StateError] after [cancel]
+  /// and on channels that do not accept client events.
+  bool trigger(String event, [Object? data]) {
+    if (_cancelled) throw StateError('Subscription to $channel is cancelled');
+    final client = _client;
+    if (client == null) return false;
+    return client._trigger(this, event, data);
+  }
+
   /// Ends this subscription: fails a pending [ready] with
   /// [ReverbCancelledException], ends [events] and releases the channel.
   /// Calling it again does nothing.

@@ -719,6 +719,20 @@ void main() {
       });
     });
 
+    test('client events go out with the client- prefix on private channels only', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final private = rig.client.subscribe(_users);
+        final public = rig.client.subscribe('feed');
+        async.flushMicrotasks();
+
+        expect(private.trigger('typing', <String, Object?>{'who': 1}), isTrue);
+        final frame = rig.connector.socket.sentNamed('client-typing').single;
+        expect(frame['channel'], _users);
+        expect(() => public.trigger('typing'), throwsStateError);
+      });
+    });
+
     test('presence channels track members and deliver member events', () {
       fakeAsync((FakeAsync async) {
         final rig = ClientRig(autoAcknowledge: false);

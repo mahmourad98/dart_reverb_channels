@@ -364,6 +364,19 @@ final class ReverbClient {
     });
   }
 
+  bool _trigger(ReverbSubscription subscription, String event, Object? data) {
+    final entry = subscription._entry;
+    if (entry == null) return false;
+    if (!entry.kind.acceptsClientEvents) {
+      throw StateError('Client events need a private or presence channel, not ${entry.name}');
+    }
+    final session = _session;
+    if (!_established || session == null || entry.status != _EntryStatus.subscribed) return false;
+    final name = event.startsWith(PusherEvents.clientEventPrefix) ? event : '${PusherEvents.clientEventPrefix}$event';
+    session.send(name, data: data, channel: entry.name);
+    return true;
+  }
+
   // ---------------------------------------------------------------------------
   // Connection cycle
   // ---------------------------------------------------------------------------
