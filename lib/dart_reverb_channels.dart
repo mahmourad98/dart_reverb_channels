@@ -18,6 +18,7 @@ export 'src/authorizer.dart'
         ChannelAuthorizer,
         HttpChannelAuthorizer;
 export 'src/cancel_token.dart' show ReverbCancelToken;
+export 'src/client.dart' show ReverbClient, ReverbErrorHandler, ReverbLogHandler, ReverbSubscription;
 export 'src/connector.dart'
     show
         ReverbConnectRequest,
