@@ -51,6 +51,22 @@ final class ReverbSubscription {
   /// The events named [event].
   Stream<ReverbEvent> on(String event) => _events.where((ReverbEvent e) => e.name == event);
 
+  /// The members of a presence channel, keyed by id. Empty for other kinds
+  /// and while not subscribed.
+  Map<String, PresenceMember> get members {
+    final entry = _entry;
+    if (entry == null || _cancelled) return const <String, PresenceMember>{};
+    return Map<String, PresenceMember>.unmodifiable(entry.members);
+  }
+
+  /// This client's own member on a presence channel, once subscribed.
+  PresenceMember? get me {
+    final entry = _entry;
+    final id = entry?.myId;
+    if (entry == null || id == null || _cancelled) return null;
+    return entry.members[id] ?? PresenceMember(id: id);
+  }
+
   /// Ends this subscription: fails a pending [ready] with
   /// [ReverbCancelledException], ends [events] and releases the channel.
   /// Calling it again does nothing.

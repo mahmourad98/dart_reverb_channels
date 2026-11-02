@@ -717,5 +717,53 @@ void main() {
         expect(names, <String>['wanted']);
       });
     });
+
+    test('presence channels track members and deliver member events', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(autoAcknowledge: false);
+        rig.authorizer.handler = (ChannelAuthorizationRequest request) =>
+            const ChannelAuthorization(auth: 'key:sig', channelData: '{"user_id":"7","user_info":{"name":"Me"}}');
+        final probe = Probe(rig.client.subscribe('presence-room.1'));
+        async.flushMicrotasks();
+
+        final subscribe = rig.connector.socket.sentNamed(PusherEvents.subscribe).single;
+        expect((subscribe['data'] as Map)['channel_data'], contains('"user_id":"7"'));
+
+        rig.connector.socket.acknowledge(
+          'presence-room.1',
+          data: <String, Object?>{
+            'presence': <String, Object?>{
+              'ids': <String>['7', '8'],
+              'hash': <String, Object?>{
+                '7': <String, Object?>{'name': 'Me'},
+                '8': null,
+              },
+              'count': 2,
+            },
+          },
+        );
+        async.flushMicrotasks();
+        expect(probe.subscription.members.keys, <String>['7', '8']);
+        expect(probe.subscription.me?.id, '7');
+
+        rig.connector.socket
+          ..emit(<String, Object?>{
+            'event': PusherEvents.internalMemberAdded,
+            'channel': 'presence-room.1',
+            'data': <String, Object?>{'user_id': '9'},
+          })
+          ..emit(<String, Object?>{
+            'event': PusherEvents.internalMemberRemoved,
+            'channel': 'presence-room.1',
+            'data': <String, Object?>{'user_id': '8'},
+          });
+        async.flushMicrotasks();
+        expect(probe.events.map((ReverbEvent e) => e.name), <String>[
+          PusherEvents.memberAdded,
+          PusherEvents.memberRemoved,
+        ]);
+        expect(probe.subscription.members.keys, unorderedEquals(<String>['7', '9']));
+      });
+    });
   });
 }

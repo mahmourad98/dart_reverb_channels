@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'authorizer.dart';
@@ -73,6 +74,9 @@ final class _ChannelEntry {
   int attempts = 0;
   _ChannelAttempt? current;
   Timer? retryTimer;
+  String? channelData;
+  String? myId;
+  final Map<String, PresenceMember> members = <String, PresenceMember>{};
 
   void stopAttempt(ReverbException reason) {
     current?.cancel(reason);
@@ -556,6 +560,8 @@ final class ReverbClient {
   void _resetEntries(ReverbException reason) {
     for (final entry in _channels.values) {
       entry.stopAttempt(reason);
+      entry.members.clear();
+      entry.myId = null;
       if (entry.status != _EntryStatus.failed) entry.status = _EntryStatus.waiting;
     }
   }
@@ -629,12 +635,14 @@ final class ReverbClient {
   }
 
   void _sendSubscribe(_ChannelEntry entry, _ChannelAttempt attempt, ChannelAuthorization? authorization) {
+    entry.channelData = authorization?.channelData;
     entry.status = _EntryStatus.acknowledging;
     _session!.send(
       PusherEvents.subscribe,
       data: <String, Object?>{
         'channel': entry.name,
         'auth': ?authorization?.auth,
+        'channel_data': ?authorization?.channelData,
       },
     );
   }
@@ -699,6 +707,10 @@ final class ReverbClient {
         _onSubscriptionSucceeded(name, frame);
       case PusherEvents.subscriptionError:
         _onSubscriptionError(name, frame);
+      case PusherEvents.internalMemberAdded:
+        _onMember(name, frame, added: true);
+      case PusherEvents.internalMemberRemoved:
+        _onMember(name, frame, added: false);
       default:
         if (frame.event.startsWith(PusherEvents.internalPrefix)) {
           // Protocol bookkeeping (for example subscription counts), not an
@@ -728,6 +740,7 @@ final class ReverbClient {
     entry.stopAttempt(const ReverbCancelledException('Acknowledged'));
     entry.status = _EntryStatus.subscribed;
     entry.attempts = 0;
+    if (entry.kind == ReverbChannelKind.presence) _seedPresence(entry, frame.decodedData);
     _log(ReverbLogLevel.debug, 'subscribed to $name');
     entry.succeed();
   }
@@ -761,6 +774,57 @@ final class ReverbClient {
         data: decodePusherData(frame.data),
         rawData: frame.data,
         userId: frame.userId,
+      ),
+    );
+  }
+
+  void _seedPresence(_ChannelEntry entry, Map<String, dynamic> data) {
+    entry.members.clear();
+    final presence = data['presence'];
+    if (presence is Map) {
+      final hash = presence['hash'];
+      final ids = presence['ids'];
+      if (hash is Map) {
+        hash.forEach((Object? id, Object? info) {
+          entry.members['$id'] = PresenceMember(id: '$id', info: info);
+        });
+      } else if (ids is List) {
+        for (final Object? id in ids) {
+          entry.members['$id'] = PresenceMember(id: '$id');
+        }
+      }
+    }
+
+    final channelData = entry.channelData;
+    if (channelData != null) {
+      try {
+        final decoded = jsonDecode(channelData);
+        if (decoded is Map && decoded['user_id'] != null) entry.myId = '${decoded['user_id']}';
+      } on FormatException {
+        entry.myId = null;
+      }
+    }
+  }
+
+  void _onMember(String name, PusherFrame frame, {required bool added}) {
+    final entry = _channels[name];
+    if (entry == null || entry.kind != ReverbChannelKind.presence || entry.status != _EntryStatus.subscribed) return;
+
+    final data = frame.decodedData;
+    final id = data['user_id']?.toString();
+    if (id == null) return;
+    if (added) {
+      entry.members[id] = PresenceMember(id: id, info: data['user_info']);
+    } else {
+      entry.members.remove(id);
+    }
+
+    entry.deliver(
+      ReverbEvent(
+        channel: name,
+        name: added ? PusherEvents.memberAdded : PusherEvents.memberRemoved,
+        data: data,
+        rawData: frame.data,
       ),
     );
   }
