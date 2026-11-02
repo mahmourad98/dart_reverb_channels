@@ -24,6 +24,9 @@ This guide describes version **1.0.0**, matching [the `v1.0.0` tag](https://gith
 2. [Installation](#installation)
 3. [Quick start](#quick-start)
 4. [Step-by-step integration](#step-by-step-integration)
+5. [Event names](#event-names)
+6. [Presence channels and client events](#presence-channels-and-client-events)
+7. [Encrypted channels](#encrypted-channels)
 
 ## Requirements
 
@@ -473,3 +476,116 @@ await reverb.dispose();
 Call `closeAll()` before switching users and release any old screen-owned handles. `dispose()`
 also closes the state stream and permanently rejects future subscriptions. Both methods are
 idempotent. `closeAll()` keeps a paused client paused; call `resume()` when it should run again.
+
+## Event names
+
+Events arrive under their wire name:
+
+- With `broadcastAs()`, the name you return (`order.shipped`).
+- Without it, the event's class name (`App\Events\OrderShipped`).
+
+`laravelEventName` resolves names the way Laravel Echo does:
+
+```dart
+subscription.on(laravelEventName('OrderShipped'));  // App\Events\OrderShipped
+subscription.on(laravelEventName('.order.shipped')); // order.shipped
+```
+
+`on(name)` matches exactly; it does not apply `laravelEventName` automatically. You can pass a
+custom `namespace: r'Domain\Events'` to the helper, or a leading backslash for a fully qualified
+name. `subscription.events` listens to all delivered channel events, including presence changes.
+
+`event.data` is always a `Map<String, dynamic>`: objects pass through, JSON strings are decoded
+once, a raw null or empty string becomes `{}`, and scalar/list values are wrapped in `{'data': value}`.
+`event.rawData` preserves the original wire payload (ciphertext on an encrypted channel).
+`event.channel` / `event.name` identify the source; `event.userId` is set when the server includes
+a sender id. Protocol bookkeeping such as `pusher_internal:subscription_succeeded` is consumed
+internally rather than delivered as an application event.
+
+## Presence channels and client events
+
+Presence channels (`presence-…`) track who is in them. Return the member's data from your
+`routes/channels.php` callback (return `false` to deny), and broadcast with
+`new PresenceChannel('chat.'.$roomId)`. The membership check belongs to your application:
+
+```php
+Broadcast::channel('chat.{roomId}', function ($user, $roomId) {
+    if (! $user->rooms()->whereKey($roomId)->exists()) {
+        return false;
+    }
+
+    return ['name' => $user->name];
+});
+```
+
+This assumes your user model has a `rooms()` relationship. Read the roster after `ready`:
+
+```dart
+final room = reverb.subscribe('presence-chat.1');
+room.on(PusherEvents.memberAdded).listen((event) => print('joined: ${event.data['user_id']}'));
+room.on(PusherEvents.memberRemoved).listen((event) => print('left: ${event.data['user_id']}'));
+
+await room.ready;
+print(room.members.keys); // member ids
+print(room.me?.id);       // this user
+```
+
+`members` is an unmodifiable snapshot keyed by string ids; `PresenceMember.info` contains the
+server's member data. The roster clears on a disconnect/pause and is rebuilt after authorization
+on the next socket. `me` identifies this client when authorization includes `user_id`.
+Keep and cancel the presence listener handles as in the screen example.
+
+Client events (whispers) go to other clients on a private or presence channel. Check your server's
+client-event policy. Current Reverb configuration uses
+`'accept_client_events_from' => 'members'` (the default) to permit subscribed senders; see the
+[Reverb app configuration](https://github.com/laravel/reverb/blob/main/config/reverb.php).
+Use a JSON-encodable payload:
+
+```dart
+room.trigger('typing', {'name': 'Ada'});              // sent as client-typing
+room.on('client-typing').listen((event) => print(event.data));
+```
+
+`trigger` adds `client-` unless already present. It returns `false` while disconnected,
+paused or not yet subscribed, and throws `StateError` after cancellation or on public/encrypted
+channels. `true` means the client attempted to send; there is no server delivery acknowledgement.
+Use your API for durable actions.
+
+## Encrypted channels
+
+`private-encrypted-…` channels need both a `ChannelAuthorizer` and a `ReverbChannelDecrypter`.
+The server must publish encrypted payloads and return a base64 `shared_secret` from authorization;
+a channel name alone does not enable encryption on your backend.
+
+The package ships no cipher. For [Pusher's encryption scheme](https://pusher.com/docs/channels/using_channels/encrypted-channels/),
+base64-decode the key, nonce and ciphertext, authenticate/decrypt using NaCl secretbox, and return
+the decrypted JSON string or decoded object. This is an adapter sketch: `yourSecretboxOpen` is
+your implementation, not a function supplied by the package.
+
+```dart
+final class SecretboxDecrypter implements ReverbChannelDecrypter {
+  @override
+  Object? decrypt({
+    required String channel,
+    required String event,
+    required String sharedSecret,
+    required Object? data,
+  }) {
+    final payload = data! as Map<String, dynamic>; // {ciphertext, nonce}, base64
+    return yourSecretboxOpen(payload['ciphertext'], payload['nonce'], sharedSecret); // JSON string
+  }
+}
+
+final reverb = ReverbClient(
+  options: options,
+  connector: const IOWebSocketConnector(), // import io.dart on native platforms
+  authorizer: authorizer,
+  decrypter: SecretboxDecrypter(),
+);
+final encrypted = reverb.subscribe('private-encrypted-orders.7');
+```
+
+An event that fails to decrypt is dropped and reported through `onError` as a
+`ReverbDecryptionException`. There is no automatic key refresh/retry on decryption failure;
+fresh authorization happens on a new subscription attempt or socket. Client events are not
+supported on encrypted channels.
