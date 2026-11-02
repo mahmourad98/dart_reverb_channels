@@ -1,3 +1,18 @@
+## 1.1.0
+
+- `ReverbSubscription.status`, `statusChanges` and `error`: a subscription now reports what happens
+  after `ready` (`pending`, `subscribed`, `resubscribing`, `failed`, `cancelled`). A `subscribed`
+  after `resubscribing` or `failed` marks a gap in which events were not delivered.
+- A refused re-subscription after a drop (for example an expired token) now shows on the
+  subscription as `failed` with its error, not only in `onError`.
+- A failed subscription whose channel is subscribed again (after a new connection cycle or another
+  subscriber of the same channel) now says so through `statusChanges`; before, it started receiving
+  events again without any signal.
+- `ReverbClient.reconnect()`: drops the socket and connects again at once with a fresh set of
+  attempts, re-subscribing every live channel, failed ones included. Completes once connected.
+- README: documents status and `reconnect()`; the install snippet follows `main` instead of pinning
+  a commit.
+
 ## 1.0.0
 
 First release.
