@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:dart_reverb_channels/testing.dart';
 import 'package:fake_async/fake_async.dart';
@@ -238,14 +237,6 @@ void main() {
         expect(probe.subscription.me, isNull);
         expect(() => probe.subscription.trigger('typing'), throwsStateError);
       });
-    });
-
-    test('the version constant matches pubspec.yaml', () {
-      final pubspec = File('pubspec.yaml').readAsStringSync();
-      final version = RegExp(r'^version:\s*(\S+)', multiLine: true).firstMatch(pubspec)!.group(1);
-
-      expect(dartReverbChannelsVersion, version);
-      expect(testOptions.socketUri.queryParameters['version'], version);
     });
   });
 }

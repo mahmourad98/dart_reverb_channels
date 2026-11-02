@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:dart_reverb_channels/testing.dart';
 import 'package:fake_async/fake_async.dart';
@@ -174,7 +173,7 @@ void main() {
   group('connection cycle', () {
     test('a refused connection gets exactly three attempts, 1 s then 2 s apart, then fails ready', () {
       fakeAsync((FakeAsync async) {
-        final rig = ClientRig()..connector.failNext(const SocketException('Connection refused'), times: 10);
+        final rig = ClientRig()..connector.failNext(const FakeNetworkError('Connection refused'), times: 10);
         final probe = Probe(rig.client.subscribe(_users));
         async.flushMicrotasks();
         expect(rig.connector.requests, hasLength(1));
@@ -190,7 +189,7 @@ void main() {
         expect(rig.connector.requests, hasLength(3));
 
         expect(probe.readyError, isA<ReverbConnectionException>());
-        expect((probe.readyError! as ReverbConnectionException).rootCause, isA<SocketException>());
+        expect((probe.readyError! as ReverbConnectionException).rootCause, isA<FakeNetworkError>());
         expect(rig.reports.map((ReverbErrorReport r) => r.willRetry), <bool>[true, true, false]);
         expect(rig.reports.map((ReverbErrorReport r) => r.attempt), <int>[1, 2, 3]);
         expect(rig.client.state, ReverbConnectionState.unavailable);
@@ -203,13 +202,13 @@ void main() {
 
     test('after the attempts run out, the next subscribe starts a fresh three-attempt cycle', () {
       fakeAsync((FakeAsync async) {
-        final rig = ClientRig()..connector.failNext(const SocketException('down'), times: 3);
+        final rig = ClientRig()..connector.failNext(const FakeNetworkError('down'), times: 3);
         final first = Probe(rig.client.subscribe(_users));
         async.elapse(const Duration(seconds: 5));
         expect(first.readyError, isNotNull);
         expect(rig.connector.requests, hasLength(3));
 
-        rig.connector.failNext(const SocketException('still down'), times: 2);
+        rig.connector.failNext(const FakeNetworkError('still down'), times: 2);
         final second = Probe(rig.client.subscribe(_other));
         async.flushMicrotasks();
         expect(rig.connector.requests, hasLength(4));
@@ -244,7 +243,7 @@ void main() {
 
     test('closeAll during a back-off stops the attempts, completes every ready and ends every stream', () {
       fakeAsync((FakeAsync async) {
-        final rig = ClientRig()..connector.failNext(const SocketException('down'));
+        final rig = ClientRig()..connector.failNext(const FakeNetworkError('down'));
         final a = Probe(rig.client.subscribe(_users));
         final b = Probe(rig.client.subscribe(_other));
         async.flushMicrotasks();
@@ -327,7 +326,7 @@ void main() {
         final probe = Probe(rig.client.subscribe(_users));
         async.flushMicrotasks();
 
-        rig.connector.failNext(const SocketException('offline'), times: 3);
+        rig.connector.failNext(const FakeNetworkError('offline'), times: 3);
         rig.connector.socket.serverClose();
         async.elapse(const Duration(seconds: 10));
 

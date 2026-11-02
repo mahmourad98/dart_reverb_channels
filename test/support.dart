@@ -3,6 +3,17 @@ import 'dart:math' as math;
 
 import 'package:dart_reverb_channels/testing.dart';
 
+/// A transport failure for tests that also run in a browser, where `dart:io`'s
+/// `SocketException` does not exist.
+final class FakeNetworkError implements Exception {
+  const FakeNetworkError(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'FakeNetworkError: $message';
+}
+
 /// Options the client tests share: the default policy (3 attempts, 1 s then 2 s,
 /// 10 s per attempt) and an Origin header.
 const ReverbOptions testOptions = ReverbOptions(
