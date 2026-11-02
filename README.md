@@ -225,3 +225,251 @@ event(new \App\Events\OrderShipped($order));
 The subscriber `private-users.7` receives `order.shipped` with `{'order_id': ...}` when the
 order belongs to user 7. `ShouldBroadcast` queues the broadcast (unless your queue connection is
 synchronous); `ShouldBroadcastNow` sends synchronously. Listen before dispatching the event.
+
+### 2. Create one client for the app
+
+Create one client per server in your app's dependency-injection setup and share it across screens.
+This factory accepts your app's token reader; call it once with, for example,
+`createReverbClient(tokenStore.readAccessToken)`. The token store belongs to your app.
+
+```dart
+import 'package:dart_reverb_channels/io.dart';
+import 'package:flutter/foundation.dart';
+
+ReverbClient createReverbClient(Future<String?> Function() readAccessToken) {
+  return ReverbClient(
+    options: const ReverbOptions(
+      host: 'ws.example.com',
+      appKey: 'your-reverb-app-key',
+      // Match a host allowed by your Reverb app's allowed_origins.
+      headers: {'Origin': 'https://example.com'},
+    ),
+    connector: const IOWebSocketConnector(),
+    authorizer: HttpChannelAuthorizer(
+      endpoint: Uri.parse('https://api.example.com/api/broadcasting/auth'),
+      headers: (ChannelAuthorizationRequest request) async {
+        final token = await readAccessToken();
+        if (token == null || token.isEmpty) {
+          throw ReverbAuthorizationException(
+            'Not signed in',
+            channel: request.channel,
+            statusCode: 401,
+          );
+        }
+        return {'Authorization': 'Bearer $token'};
+      },
+    ),
+    onError: (ReverbErrorReport report) => debugPrint('Reverb: $report'),
+    onLog: (ReverbLogRecord record) => debugPrint('Reverb: $record'),
+  );
+}
+```
+
+The header builder runs on every authorization attempt, including after a reconnect. The package
+does not sign users in, refresh tokens or automatically retry a 401/403. Read the current token in
+the builder and handle refresh in your app's HTTP/authentication layer. WebSocket `headers`
+configure the upgrade; `HttpChannelAuthorizer.headers` configure the separate HTTP auth request.
+
+Keep the host and public app key in your build configuration (for example `--dart-define`).
+Configure Reverb's `allowed_origins` to accept your app: native apps send no `Origin` unless you
+provide one; browsers supply their own origin.
+
+#### Authorization request and response
+
+`HttpChannelAuthorizer` POSTs `socket_id` and the full `channel_name`, with JSON request encoding
+by default. For form encoding, pass `body: ChannelAuthorizationBody.form`. It expects HTTP 200
+with a raw JSON object containing a non-empty `auth` string:
+
+```json
+{"auth": "your-reverb-app-key:signature"}
+```
+
+Presence responses also contain `channel_data` (usually a JSON string containing `user_id` and
+`user_info`); encrypted responses require `shared_secret`. Do not wrap the response in your API's
+usual `data` envelope. Headers default to `Accept: application/json` and the body's content type;
+your header builder can override them.
+
+`clientFactory` must return a fresh `http.Client` for each request: the authorizer closes it on
+completion or cancellation. Do not return a shared app-wide client.
+
+#### Using your own HTTP stack (optional)
+
+Implement `ChannelAuthorizer` to reuse Dio, interceptors and token refresh. For this example, add
+Dio to your app (`flutter pub add dio`); it is not a dependency of this package. Supply a Dio client
+with your API base URL and authentication interceptors:
+
+```dart
+import 'dart:async';
+
+import 'package:dart_reverb_channels/dart_reverb_channels.dart';
+import 'package:dio/dio.dart' as dio;
+
+final class DioChannelAuthorizer implements ChannelAuthorizer {
+  DioChannelAuthorizer(this.client);
+
+  final dio.Dio client;
+
+  @override
+  Future<ChannelAuthorization> authorize(ChannelAuthorizationRequest request) async {
+    final cancel = dio.CancelToken();
+    if (request.cancelToken.isCancelled) {
+      throw const ReverbCancelledException('Authorization cancelled');
+    }
+    unawaited(request.cancelToken.whenCancelled.then((_) => cancel.cancel()));
+
+    try {
+      final response = await client.post<Map<String, dynamic>>(
+        '/api/broadcasting/auth',
+        data: {'socket_id': request.socketId, 'channel_name': request.channel},
+        cancelToken: cancel,
+      );
+      final data = response.data;
+      if (data == null) throw const FormatException('Empty authorization response');
+      return ChannelAuthorization.fromJson(data);
+    } on FormatException catch (error) {
+      throw ReverbAuthorizationException(
+        'Malformed authorization response',
+        channel: request.channel,
+        malformedResponse: true,
+        cause: error,
+      );
+    } on dio.DioException catch (error) {
+      throw ReverbAuthorizationException(
+        'Authorization failed',
+        channel: request.channel,
+        statusCode: error.response?.statusCode,
+        cause: error,
+      );
+    }
+  }
+}
+```
+
+### 3. Subscribe where you need events
+
+Subscribe when a screen (or a controller, or a repository) starts, and cancel when it ends.
+The widget below receives the shared client explicitly:
+
+```dart
+import 'dart:async';
+
+import 'package:dart_reverb_channels/dart_reverb_channels.dart';
+import 'package:flutter/material.dart';
+
+class OrdersScreen extends StatefulWidget {
+  const OrdersScreen({super.key, required this.reverb, required this.userId});
+
+  final ReverbClient reverb;
+  final int userId;
+
+  @override
+  State<OrdersScreen> createState() => _OrdersScreenState();
+}
+
+class _OrdersScreenState extends State<OrdersScreen> {
+  late final ReverbSubscription _subscription;
+  late final StreamSubscription<ReverbEvent> _listener;
+  int? _lastShippedOrder;
+
+  @override
+  void initState() {
+    super.initState();
+    _subscription = widget.reverb.subscribe('private-users.${widget.userId}');
+    _listener = _subscription.on('order.shipped').listen((ReverbEvent event) {
+      if (mounted) {
+        setState(() => _lastShippedOrder = event.data['order_id'] as int?);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    unawaited(_listener.cancel());
+    unawaited(_subscription.cancel());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Text('Last shipped order: ${_lastShippedOrder ?? '-'}');
+}
+```
+
+Two screens subscribing to the same channel share one subscription on the server; cancelling one
+does not affect the other. Cancelling only the `StreamSubscription` stops that listener; you
+must also cancel the `ReverbSubscription` to release the channel. Attach listeners before awaiting
+`ready` so you do not miss events between acknowledgement and listener registration.
+
+This widget assumes `userId` and `reverb` stay the same during its lifetime. If either changes,
+cancel the old handles and subscribe again in `didUpdateWidget`, or give the screen a new key.
+
+### 4. Know when a channel is ready (optional)
+
+`subscription.ready` completes when the server has accepted the subscription, or fails with the
+reason it could not:
+
+```dart
+try {
+  await subscription.ready;
+  // Subscribed: events published from now on will arrive.
+} on ReverbAuthorizationException catch (error) {
+  // The auth endpoint refused (error.statusCode), e.g. the user may not join.
+} on ReverbCancelledException {
+  // The subscription was cancelled first.
+} on ReverbException catch (error) {
+  // Network, timeout or protocol problem after all attempts.
+}
+```
+
+You do not have to await `ready`: events flow as soon as the channel is subscribed either way, and
+an un-awaited failure is never reported as an uncaught error.
+
+`ready` completes once; `isReady` stays true after that success, even during a later disconnect.
+Neither indicates current channel readiness. `reverb.state == ReverbConnectionState.connected` means the socket handshake
+succeeded; individual channels may still be authorizing.
+
+To show connection status, start with `reverb.state` and listen to `reverb.states` for subsequent
+changes (`connecting`, `connected`, `reconnecting`, `unavailable`, `failed`, `paused`,
+`disconnected`). The broadcast stream does not replay the current state. Cancel that listener
+when its owner ends.
+
+### 5. Pause in the background (recommended on mobile)
+
+iOS silently kills sockets of suspended apps. Let the client close the socket in the background and
+reconnect in the foreground:
+
+```dart
+import 'package:dart_reverb_channels/flutter.dart';
+import 'package:flutter/widgets.dart';
+
+// In main(), before attaching observers or calling runApp:
+WidgetsFlutterBinding.ensureInitialized();
+final lifecycle = ReverbLifecycleBinding(reverb)..attach();
+// On teardown: lifecycle.detach();
+```
+
+The binding pauses on `paused` / `detached` and resumes on `resumed`; it ignores `inactive` /
+`hidden`. You can also call `reverb.pause()` / `reverb.resume()` yourself. Pending `ready` futures
+keep waiting while paused.
+
+Subscriptions survive the pause; their channels are re-subscribed on resume. Events published while
+paused are not replayed (see [How it behaves](#how-it-behaves)). Detaching only removes the lifecycle
+observer; dispose the client separately.
+
+### 6. Log out and dispose
+
+On logout, end every subscription so nothing re-authorizes with the old user's token:
+
+```dart
+await reverb.closeAll(); // the client stays usable for the next user
+```
+
+When the client itself is no longer needed:
+
+```dart
+lifecycle.detach(); // if you attached a lifecycle binding
+await reverb.dispose();
+```
+
+Call `closeAll()` before switching users and release any old screen-owned handles. `dispose()`
+also closes the state stream and permanently rejects future subscriptions. Both methods are
+idempotent. `closeAll()` keeps a paused client paused; call `resume()` when it should run again.
