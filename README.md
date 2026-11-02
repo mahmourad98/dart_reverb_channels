@@ -29,6 +29,8 @@ This guide describes version **1.0.0**, matching [the `v1.0.0` tag](https://gith
 7. [Encrypted channels](#encrypted-channels)
 8. [Configuration reference](#configuration-reference)
 9. [How it behaves](#how-it-behaves)
+10. [Errors](#errors)
+11. [Testing your code](#testing-your-code)
 
 ## Requirements
 
@@ -710,3 +712,73 @@ Read it at request time, since it changes after reconnecting. The event must use
    not miss an outcome, bound your wait with a timeout and re-check through your API.
 8. `cancel`, `closeAll` and a new socket make any work still in flight for the old state (an
    authorization request, a late acknowledgement, a retry timer) do nothing.
+
+## Errors
+
+`ready` failures and `onError` reports carry a `ReverbException`. It is a sealed class, so you can
+`switch` over it:
+
+| Type | Meaning | Retried by default |
+|---|---|---|
+| `ReverbConnectionException` | The socket could not open or dropped. `cause` is the raw error (`SocketException`, TLS failure…), `rootCause` without wrappers. | Yes |
+| `ReverbTimeoutException` | An attempt ran past its deadline. | Yes |
+| `ReverbProtocolException` | `pusher:error` or a 4000–4299 close `code`. | Any code outside 4000–4099 (including unknown/null); see below |
+| `ReverbHeartbeatException` | No pong in time. | Yes |
+| `ReverbAuthorizationException` | The auth endpoint failed. `statusCode`, `body`, `malformedResponse`. | 5xx, 429, 408 and transport failures |
+| `ReverbSubscriptionException` | The server refused the subscription (`pusher:subscription_error`). | 5xx and 429 |
+| `ReverbFormatException`, `ReverbDecryptionException` | A frame or payload could not be read. | No |
+| `ReverbCancelledException` | Cancelled before ready. | No |
+| `ReverbConfigurationException` | The request cannot work with this setup. | No |
+
+`onError` reports runtime failures as a `ReverbErrorReport` with the `stage`
+(`connect`, `connection`, `subscribe`, `frame`, `protocol`), `channel`, `attempt` and `willRetry`.
+Configuration failures returned by `subscribe` are exposed through `ready` and warning logs;
+cancelling a pending subscription fails `ready` without an `onError` report. Do not rely solely on
+`onError` to detect an invalid setup.
+
+A `pusher:error` on an already-established socket is reported with stage `protocol` and changes
+no connection/channel state by itself. A close frame drives reconnect behavior. Failed channel
+reauthorization after a reconnect is reported through `onError` even though `ready` may have
+succeeded earlier.
+
+On native platforms, import `io.dart` to use `isTlsFailure`. For example, set this on
+`ReverbOptions` to decline retries after a TLS failure:
+
+```dart
+retryIf: (ReverbException error) => !isTlsFailure(error) && error.isRetryable,
+```
+
+## Testing your code
+
+`package:dart_reverb_channels/testing.dart` replaces the network with in-memory fakes, so your
+tests drive the server side directly:
+
+```dart
+import 'package:dart_reverb_channels/testing.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test('shows shipped orders', () async {
+    final connector = FakeReverbConnector(autoHandshake: true, autoAcknowledge: true);
+    final reverb = ReverbClient(
+      options: const ReverbOptions(host: 'test', appKey: 'key'),
+      connector: connector,
+      authorizer: FakeChannelAuthorizer(),
+    );
+
+    final subscription = reverb.subscribe('private-users.1');
+    await subscription.ready;
+
+    final next = subscription.on('order.shipped').first;
+    connector.socket.event('private-users.1', 'order.shipped', {'order_id': 7});
+
+    expect((await next).data['order_id'], 7);
+    await reverb.dispose();
+  });
+}
+```
+
+`FakeReverbConnector` can also hold or fail connection attempts (`hold`, `failNext`) and records
+every request; `FakeReverbSocket` can send `refuse`, `protocolError` and `serverClose`, and records
+what the client sent (`sentNamed`). `FakeChannelAuthorizer` can hold, fail or script
+authorizations.
