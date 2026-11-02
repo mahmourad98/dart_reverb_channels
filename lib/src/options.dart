@@ -111,6 +111,20 @@ final class ReverbOptions {
     this.idleTimeout = Duration.zero,
   });
 
+  /// Options for a hosted Pusher Channels app in [cluster] (such as `eu` or
+  /// `mt1`): host `ws-{cluster}.pusher.com`, TLS on port 443 and every other
+  /// field at its default. Adjust the rest with [copyWith].
+  ///
+  /// Throws [ArgumentError] unless [cluster] is a cluster name: letters,
+  /// digits and hyphens.
+  factory ReverbOptions.pusherCluster({required String cluster, required String appKey}) {
+    final name = cluster.trim().toLowerCase();
+    if (!RegExp(r'^[a-z0-9]+(-[a-z0-9]+)*$').hasMatch(name)) {
+      throw ArgumentError.value(cluster, 'cluster', 'must be a Pusher cluster name such as "eu" or "mt1"');
+    }
+    return ReverbOptions(host: 'ws-$name.pusher.com', appKey: appKey);
+  }
+
   /// The server's host name, without a scheme.
   final String host;
 

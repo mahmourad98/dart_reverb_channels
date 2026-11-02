@@ -718,6 +718,9 @@ The constructor validates options and can throw `ArgumentError` before any subsc
 `wss://ws.example.com:443/app/your-reverb-app-key?protocol=7&client=dart_reverb_channels&version=1.1.0`.
 Use `pathPrefix: '/ws'` for `/ws/app/{key}`; `socketPath` replaces that entire path.
 
+For an app on hosted Pusher Channels, `ReverbOptions.pusherCluster(cluster: 'eu', appKey: '…')`
+sets the host to `ws-eu.pusher.com` with TLS on port 443; adjust the rest with `copyWith`.
+
 ### Retry policies
 
 `RetryPolicy.none` allows one attempt. `RetryPolicy(maxAttempts: 3, delays: [...])` counts the

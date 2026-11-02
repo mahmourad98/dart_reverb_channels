@@ -233,4 +233,23 @@ void main() {
       expect((failure! as ReverbAuthorizationException).statusCode, 503);
     });
   });
+
+  group('ReverbOptions.pusherCluster', () {
+    test('builds the hosted Pusher socket URL', () {
+      final options = ReverbOptions.pusherCluster(cluster: 'EU', appKey: 'key');
+      expect(options.host, 'ws-eu.pusher.com');
+      expect(options.socketUri.toString(), startsWith('wss://ws-eu.pusher.com:443/app/key?protocol=7'));
+      expect(options.copyWith(connectTimeout: const Duration(seconds: 5)).host, 'ws-eu.pusher.com');
+    });
+
+    test('rejects names that are not cluster names', () {
+      for (final name in <String>['', ' ', 'eu.pusher.com', 'eu/', '-eu', 'eu-']) {
+        expect(
+          () => ReverbOptions.pusherCluster(cluster: name, appKey: 'key'),
+          throwsArgumentError,
+          reason: name,
+        );
+      }
+    });
+  });
 }
