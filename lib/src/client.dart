@@ -200,11 +200,26 @@ final class ReverbClient {
   /// outcome.
   final List<Completer<void>> _connectWaiters = <Completer<void>>[];
 
+  final StreamController<ReverbErrorReport> _errors = StreamController<ReverbErrorReport>.broadcast();
+  final StreamController<ReverbEvent> _events = StreamController<ReverbEvent>.broadcast();
+
   /// The connection state.
   ReverbConnectionState get state => _state;
 
   /// Connection state changes.
   Stream<ReverbConnectionState> get states => _states.stream;
+
+  /// Every failure the client handled, as a broadcast stream: the same
+  /// reports the `onError` handler receives, for any number of listeners.
+  /// It does not replay earlier reports, and it is done after [dispose].
+  Stream<ReverbErrorReport> get errors => _errors.stream;
+
+  /// Every event delivered to a subscription of this client, from every
+  /// channel and once per event, presence member events included, as a
+  /// broadcast stream. It only observes: channels arrive here while some
+  /// [ReverbSubscription] holds them, so it suits logging and diagnostics,
+  /// not receiving channels nobody subscribed to. Done after [dispose].
+  Stream<ReverbEvent> get events => _events.stream;
 
   /// The socket id of the established socket, or null.
   String? get socketId => _established ? _session?.socketId : null;
@@ -365,13 +380,16 @@ final class ReverbClient {
     return connected;
   }
 
-  /// [closeAll], then releases the state stream. The client is unusable after.
+  /// [closeAll], then releases the [states], [errors] and [events] streams.
+  /// The client is unusable after.
   Future<void> dispose() async {
     if (_disposed) return;
     // Refuse new subscriptions before anything yields.
     _disposed = true;
     await closeAll();
     await _states.close();
+    await _errors.close();
+    await _events.close();
   }
 
   // ---------------------------------------------------------------------------
@@ -879,6 +897,12 @@ final class ReverbClient {
     }
   }
 
+  /// Delivers [event] to [entry]'s owners and to [events].
+  void _deliver(_ChannelEntry entry, ReverbEvent event) {
+    entry.deliver(event);
+    if (!_events.isClosed) _events.add(event);
+  }
+
   void _onSubscriptionSucceeded(String name, PusherFrame frame) {
     if (_consumeStaleAck(name)) return;
     final entry = _channels[name];
@@ -949,7 +973,8 @@ final class ReverbClient {
       }
     }
 
-    entry.deliver(
+    _deliver(
+      entry,
       ReverbEvent(
         channel: name,
         name: frame.event,
@@ -1001,7 +1026,8 @@ final class ReverbClient {
       entry.members.remove(id);
     }
 
-    entry.deliver(
+    _deliver(
+      entry,
       ReverbEvent(
         channel: name,
         name: added ? PusherEvents.memberAdded : PusherEvents.memberRemoved,
@@ -1068,12 +1094,14 @@ final class ReverbClient {
   void _report(ReverbErrorReport report) {
     _log(ReverbLogLevel.warning, report.toString());
     final handler = _onError;
-    if (handler == null) return;
-    try {
-      handler(report);
-    } catch (error) {
-      _log(ReverbLogLevel.warning, 'onError handler threw: $error');
+    if (handler != null) {
+      try {
+        handler(report);
+      } catch (error) {
+        _log(ReverbLogLevel.warning, 'onError handler threw: $error');
+      }
     }
+    if (!_errors.isClosed) _errors.add(report);
   }
 
   void _log(ReverbLogLevel level, String message) {

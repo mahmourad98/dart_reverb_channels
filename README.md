@@ -745,6 +745,7 @@ request's cancellation token, expose the socket's close code/reason, and close a
 |---|---|
 | `reverb.subscribe(channel)` | Returns a new owner handle; shares the wire subscription with other owners. |
 | `reverb.state` / `states` | Current connection state / broadcast stream of changes. |
+| `reverb.errors` / `events` | Broadcast streams of every handled failure (the reports `onError` receives) / every event delivered to any handle, once per event. Both only observe. |
 | `reverb.socketId` | Current socket id, or `null` without an established socket. Changes on reconnect. |
 | `reverb.channels` | Unmodifiable snapshot of channel names with live handles, including pending/failed ones. |
 | `reverb.pause()` / `resume()` | Close and keep handles / reconnect after an explicit pause. |
@@ -812,6 +813,8 @@ Read it at request time, since it changes after reconnecting. The event must use
 
 `onError` reports runtime failures as a `ReverbErrorReport` with the `stage`
 (`connect`, `connection`, `subscribe`, `frame`, `protocol`), `channel`, `attempt` and `willRetry`.
+The same reports arrive on `reverb.errors`, a broadcast stream for any number of listeners (for
+example a logger and an offline banner).
 Configuration failures returned by `subscribe` are exposed through `ready` and warning logs;
 cancelling a pending subscription fails `ready` without an `onError` report. Do not rely solely on
 `onError` to detect an invalid setup.

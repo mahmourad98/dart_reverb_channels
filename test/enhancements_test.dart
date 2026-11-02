@@ -125,4 +125,53 @@ void main() {
       });
     });
   });
+
+  group('client-wide streams', () {
+    test('errors carries every report onError receives, to any number of listeners', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        rig.authorizer.handler = (ChannelAuthorizationRequest request) =>
+            throw ReverbAuthorizationException('Forbidden', channel: request.channel, statusCode: 403);
+        final first = <ReverbErrorReport>[];
+        final second = <ReverbErrorReport>[];
+        rig.client.errors.listen(first.add);
+        rig.client.errors.listen(second.add);
+
+        rig.client.subscribe(_users);
+        async.flushMicrotasks();
+
+        expect(rig.reports, hasLength(1));
+        expect(first, rig.reports);
+        expect(second, rig.reports);
+      });
+    });
+
+    test('events carries each delivered event once, from every held channel, until dispose', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final seen = <ReverbEvent>[];
+        var done = false;
+        rig.client.events.listen(seen.add, onDone: () => done = true);
+        rig.client
+          ..subscribe(_users)
+          ..subscribe(_users)
+          ..subscribe(_news);
+        async.flushMicrotasks();
+
+        rig.connector.socket
+          ..event(_users, 'order.shipped', <String, Object?>{'order_id': 1})
+          ..event(_news, 'headline', <String, Object?>{'id': 2})
+          ..event('nobody-holds-this', 'ignored', <String, Object?>{'id': 3});
+        async.flushMicrotasks();
+        expect(seen.map((ReverbEvent e) => '${e.channel} ${e.name}'), <String>[
+          '$_users order.shipped',
+          '$_news headline',
+        ]);
+
+        unawaited(rig.client.dispose());
+        async.flushMicrotasks();
+        expect(done, isTrue);
+      });
+    });
+  });
 }
