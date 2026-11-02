@@ -17,6 +17,7 @@ final class ClientRig {
     ReverbOptions options = testOptions,
     bool autoHandshake = true,
     bool autoAcknowledge = true,
+    ReverbChannelDecrypter? decrypter,
     bool withAuthorizer = true,
   }) : connector = FakeReverbConnector(autoHandshake: autoHandshake, autoAcknowledge: autoAcknowledge),
        authorizer = FakeChannelAuthorizer() {
@@ -24,6 +25,7 @@ final class ClientRig {
       options: options,
       connector: connector,
       authorizer: withAuthorizer ? authorizer : null,
+      decrypter: decrypter,
       onError: reports.add,
       onLog: logs.add,
       random: math.Random(1),

@@ -633,14 +633,15 @@ void main() {
   });
 
   group('configuration problems', () {
-    test('an invalid name or a missing authorizer fail ready without touching the socket', () {
+    test('an invalid name, a missing authorizer or decrypter fail ready without touching the socket', () {
       fakeAsync((FakeAsync async) {
         final rig = ClientRig(withAuthorizer: false);
         final invalid = Probe(rig.client.subscribe('bad name'));
         final private = Probe(rig.client.subscribe(_users));
+        final encrypted = Probe(rig.client.subscribe('private-encrypted-x'));
         async.flushMicrotasks();
 
-        for (final probe in <Probe>[invalid, private]) {
+        for (final probe in <Probe>[invalid, private, encrypted]) {
           expect(probe.readyError, isA<ReverbConfigurationException>());
           expect(probe.eventsDone, isFalse);
         }
@@ -765,5 +766,38 @@ void main() {
         expect(probe.subscription.members.keys, unorderedEquals(<String>['7', '9']));
       });
     });
+
+    test('encrypted channels decrypt with the shared secret; failures are reported and dropped', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(decrypter: _ReversingDecrypter());
+        rig.authorizer.handler = (ChannelAuthorizationRequest request) =>
+            const ChannelAuthorization(auth: 'key:sig', sharedSecret: 'secret');
+        final probe = Probe(rig.client.subscribe('private-encrypted-orders'));
+        async.flushMicrotasks();
+        expect(probe.succeeded, isTrue);
+
+        rig.connector.socket
+          ..event('private-encrypted-orders', 'order', <String, Object?>{'ciphertext': '}1:"di"{', 'nonce': 'n'})
+          ..event('private-encrypted-orders', 'broken', <String, Object?>{'nonce': 'n'});
+        async.flushMicrotasks();
+
+        expect(probe.events.single.data, <String, dynamic>{'id': 1});
+        expect(rig.reports.single.error, isA<ReverbDecryptionException>());
+      });
+    });
   });
+}
+
+final class _ReversingDecrypter implements ReverbChannelDecrypter {
+  @override
+  Object? decrypt({
+    required String channel,
+    required String event,
+    required String sharedSecret,
+    required Object? data,
+  }) {
+    final ciphertext = (data! as Map)['ciphertext'] as String?;
+    if (ciphertext == null || sharedSecret != 'secret') throw const FormatException('no ciphertext');
+    return String.fromCharCodes(ciphertext.codeUnits.reversed);
+  }
 }

@@ -74,6 +74,7 @@ final class _ChannelEntry {
   int attempts = 0;
   _ChannelAttempt? current;
   Timer? retryTimer;
+  String? sharedSecret;
   String? channelData;
   String? myId;
   final Map<String, PresenceMember> members = <String, PresenceMember>{};
@@ -121,7 +122,8 @@ final class _ChannelEntry {
 ///   cycle runs and every live channel resubscribes with fresh authorization.
 ///   Events published while disconnected are not replayed.
 /// - **Pluggable edges.** The transport ([ReverbConnector]), authorization
-///   ([ChannelAuthorizer]), error reporting and logging are all injected.
+///   ([ChannelAuthorizer]), decryption ([ReverbChannelDecrypter]), error
+///   reporting and logging are all injected.
 ///
 /// Create one per server and keep it; [subscribe] never throws.
 final class ReverbClient {
@@ -130,16 +132,19 @@ final class ReverbClient {
   /// [connector] defaults to [WebSocketChannelConnector]; on native platforms
   /// pass `IOWebSocketConnector` from `package:dart_reverb_channels/io.dart` to send
   /// upgrade headers and use your own `HttpClient`. [authorizer] is required
-  /// for private and presence channels. [random] seeds the retry jitter.
+  /// for private, encrypted and presence channels, [decrypter] for encrypted
+  /// ones. [random] seeds the retry jitter.
   ReverbClient({
     required this.options,
     ReverbConnector? connector,
     ChannelAuthorizer? authorizer,
+    ReverbChannelDecrypter? decrypter,
     ReverbErrorHandler? onError,
     ReverbLogHandler? onLog,
     math.Random? random,
   }) : _connector = connector ?? const WebSocketChannelConnector(),
        _authorizer = authorizer,
+       _decrypter = decrypter,
        _onError = onError,
        _onLog = onLog,
        _random = random ?? math.Random() {
@@ -151,6 +156,7 @@ final class ReverbClient {
 
   final ReverbConnector _connector;
   final ChannelAuthorizer? _authorizer;
+  final ReverbChannelDecrypter? _decrypter;
   final ReverbErrorHandler? _onError;
   final ReverbLogHandler? _onLog;
   final math.Random _random;
@@ -289,6 +295,9 @@ final class ReverbClient {
     final kind = ReverbChannelKind.of(channel);
     if (kind.requiresAuthorization && _authorizer == null) {
       return ReverbConfigurationException('$channel needs a ChannelAuthorizer');
+    }
+    if (kind == ReverbChannelKind.encrypted && _decrypter == null) {
+      return ReverbConfigurationException('$channel needs a ReverbChannelDecrypter');
     }
     return null;
   }
@@ -618,6 +627,15 @@ final class ReverbClient {
         ChannelAuthorizationRequest(channel: entry.name, socketId: socketId, cancelToken: attempt.token),
       );
       if (!_isCurrent(entry, attempt)) return;
+
+      if (entry.kind == ReverbChannelKind.encrypted && authorization.sharedSecret == null) {
+        throw ReverbAuthorizationException(
+          'Authorization for ${entry.name} has no shared_secret',
+          channel: entry.name,
+          statusCode: 200,
+          malformedResponse: true,
+        );
+      }
       _sendSubscribe(entry, attempt, authorization);
     } catch (error, stackTrace) {
       // A stale attempt's result, success or failure, is dropped silently.
@@ -635,6 +653,7 @@ final class ReverbClient {
   }
 
   void _sendSubscribe(_ChannelEntry entry, _ChannelAttempt attempt, ChannelAuthorization? authorization) {
+    entry.sharedSecret = authorization?.sharedSecret;
     entry.channelData = authorization?.channelData;
     entry.status = _EntryStatus.acknowledging;
     _session!.send(
@@ -767,11 +786,36 @@ final class ReverbClient {
     final entry = _channels[name];
     if (entry == null || entry.subscriptions.isEmpty || entry.status != _EntryStatus.subscribed) return;
 
+    Object? payload = frame.data;
+    if (entry.kind == ReverbChannelKind.encrypted) {
+      final secret = entry.sharedSecret;
+      try {
+        if (secret == null) throw StateError('No shared secret for $name');
+        payload = _decrypter!.decrypt(channel: name, event: frame.event, sharedSecret: secret, data: frame.decodedData);
+      } catch (error, stackTrace) {
+        _report(
+          ReverbErrorReport(
+            error: ReverbDecryptionException(
+              'Could not decrypt ${frame.event} on $name',
+              channel: name,
+              event: frame.event,
+              cause: error,
+              stackTrace: stackTrace,
+            ),
+            stage: ReverbErrorStage.frame,
+            stackTrace: stackTrace,
+            channel: name,
+          ),
+        );
+        return;
+      }
+    }
+
     entry.deliver(
       ReverbEvent(
         channel: name,
         name: frame.event,
-        data: decodePusherData(frame.data),
+        data: decodePusherData(payload),
         rawData: frame.data,
         userId: frame.userId,
       ),
