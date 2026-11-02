@@ -294,4 +294,296 @@ void main() {
       });
     });
   });
+
+  group('reconnect', () {
+    test('a drop while subscribed reconnects at once and resubscribes with the new socket id', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        expect(probe.succeeded, isTrue);
+
+        rig.connector.socket.serverClose(1006);
+        async.flushMicrotasks();
+
+        expect(rig.connector.requests, hasLength(2));
+        expect(rig.client.state, ReverbConnectionState.connected);
+        final resubscribe = rig.subscribes(rig.connector.socket, _users).single;
+        expect((resubscribe['data'] as Map)['auth'], 'key:$_users:2.2');
+        expect(rig.authorizer.requests.map((ChannelAuthorizationRequest r) => r.socketId), <String>['1.1', '2.2']);
+        expect(rig.reports.single.stage, ReverbErrorStage.connection);
+        expect(rig.reports.single.willRetry, isTrue);
+
+        rig.connector.socket.event(_users, 'order.shipped', <String, Object?>{'order_id': 4});
+        async.flushMicrotasks();
+        expect(probe.events.single.data['order_id'], 4);
+      });
+    });
+
+    test('a reconnect cycle is bounded; afterwards live subscriptions stay open and silent', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        rig.connector.failNext(const SocketException('offline'), times: 3);
+        rig.connector.socket.serverClose();
+        async.elapse(const Duration(seconds: 10));
+
+        expect(rig.connector.requests, hasLength(4));
+        expect(rig.client.state, ReverbConnectionState.unavailable);
+        expect(probe.succeeded, isTrue, reason: 'ready completes once');
+        expect(probe.eventsDone, isFalse);
+      });
+    });
+
+    test('close code 4100 waits 1 s before the first reattempt; 4200 reattempts at once', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        rig.connector.socket.serverClose(4100, 'Over capacity');
+        async.flushMicrotasks();
+        expect(rig.connector.requests, hasLength(1));
+        async.elapse(const Duration(milliseconds: 999));
+        expect(rig.connector.requests, hasLength(1));
+        async.elapse(const Duration(milliseconds: 1));
+        expect(rig.connector.requests, hasLength(2));
+
+        rig.connector.socket.serverClose(4200, 'Generic reconnect');
+        async.flushMicrotasks();
+        expect(rig.connector.requests, hasLength(3));
+      });
+    });
+
+    test('close code 4001 on an established socket is fatal: no reconnect', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        rig.connector.socket.serverClose(4001, 'App does not exist');
+        async.elapse(const Duration(seconds: 30));
+        expect(rig.connector.requests, hasLength(1));
+        expect(rig.client.state, ReverbConnectionState.failed);
+        expect(rig.reports.single.willRetry, isFalse);
+      });
+    });
+
+    test('a missing pong counts as a drop; any frame counts as an answer', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        final socket = rig.connector.socket;
+
+        async.elapse(const Duration(seconds: 30));
+        expect(socket.sentNamed(PusherEvents.ping), hasLength(1));
+        socket.emit(<String, Object?>{'event': PusherEvents.pong});
+        async.elapse(const Duration(seconds: 29));
+        expect(socket.isClosed, isFalse);
+
+        async.elapse(const Duration(seconds: 1));
+        expect(socket.sentNamed(PusherEvents.ping), hasLength(2));
+        async.elapse(const Duration(seconds: 30));
+        expect(socket.closedByClient, isTrue);
+        expect(rig.reports.last.error, isA<ReverbHeartbeatException>());
+        expect(rig.connector.requests, hasLength(2));
+      });
+    });
+
+    test('a server ping is answered with a pong', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        rig.connector.socket.emit(<String, Object?>{'event': PusherEvents.ping, 'data': <String, Object?>{}});
+        async.flushMicrotasks();
+        expect(rig.connector.socket.sentNamed(PusherEvents.pong), hasLength(1));
+      });
+    });
+  });
+
+  group('channel attempts', () {
+    test('logout then login as another user never resubscribes the old channel', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig()..authorizer.hold = true;
+        final old = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        expect(rig.authorizer.pendingCount, 1);
+
+        unawaited(rig.client.closeAll());
+        final fresh = Probe(rig.client.subscribe(_other));
+        async.flushMicrotasks();
+
+        rig.authorizer.completePending();
+        async.flushMicrotasks();
+        rig.authorizer.completePending();
+        async.flushMicrotasks();
+
+        for (final socket in rig.connector.sockets) {
+          expect(rig.subscribes(socket, _users), isEmpty);
+        }
+        expect(rig.subscribes(rig.connector.socket, _other), hasLength(1));
+        expect(old.readyError, isA<ReverbCancelledException>());
+        expect(fresh.succeeded, isTrue);
+      });
+    });
+
+    test('a subscription error on one channel does not affect another', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(autoAcknowledge: false);
+        final refused = Probe(rig.client.subscribe(_users));
+        final accepted = Probe(rig.client.subscribe(_other));
+        async.flushMicrotasks();
+
+        rig.connector.socket.refuse(_users, status: 403);
+        rig.connector.socket.acknowledge(_other);
+        async.flushMicrotasks();
+
+        expect(refused.readyError, isA<ReverbSubscriptionException>().having((e) => e.status, 'status', 403));
+        expect(accepted.succeeded, isTrue);
+        async.elapse(const Duration(seconds: 30));
+        expect(rig.subscribes(rig.connector.socket, _users), hasLength(1), reason: '4xx is not retried');
+        expect(rig.connector.socket.isClosed, isFalse);
+      });
+    });
+
+    test('a channel cancelled during its authorization and subscribed again uses only the new key', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig()..authorizer.hold = true;
+        final live = Probe(rig.client.subscribe(_other));
+        async.flushMicrotasks();
+        rig.authorizer.completePending();
+        async.flushMicrotasks();
+        expect(live.succeeded, isTrue);
+
+        final first = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        unawaited(first.subscription.cancel());
+        final second = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        expect(rig.authorizer.pendingCount, 2);
+
+        rig.authorizer.completePending(const ChannelAuthorization(auth: 'key:old'));
+        async.flushMicrotasks();
+        expect(rig.subscribes(rig.connector.socket, _users), isEmpty);
+
+        rig.authorizer.completePending(const ChannelAuthorization(auth: 'key:new'));
+        async.flushMicrotasks();
+        final frames = rig.subscribes(rig.connector.socket, _users);
+        expect(frames, hasLength(1));
+        expect((frames.single['data'] as Map)['auth'], 'key:new');
+        expect(second.succeeded, isTrue);
+        expect(rig.connector.sockets, hasLength(1));
+      });
+    });
+
+    test('pusher:error on an established socket is reported and changes nothing', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        rig.connector.socket.protocolError(4009, 'Invalid signature');
+        async.flushMicrotasks();
+        expect(rig.reports.single.stage, ReverbErrorStage.protocol);
+        expect(rig.client.state, ReverbConnectionState.connected);
+
+        rig.connector.socket.event(_users, 'order.shipped', '{"order_id":3}');
+        async.flushMicrotasks();
+        expect(probe.events.single.data, <String, dynamic>{'order_id': 3});
+      });
+    });
+
+    test('a rejected authorization fails ready; the stream stays open and silent until cancel', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        rig.authorizer.handler = (ChannelAuthorizationRequest request) => throw ReverbAuthorizationException(
+          'Forbidden',
+          channel: request.channel,
+          statusCode: 403,
+        );
+        final probe = Probe(rig.client.subscribe(_users));
+        async.elapse(const Duration(seconds: 30));
+
+        expect(probe.readyError, isA<ReverbAuthorizationException>());
+        expect(rig.authorizer.requests, hasLength(1));
+        expect(probe.eventsDone, isFalse);
+
+        unawaited(probe.subscription.cancel());
+        async.flushMicrotasks();
+        expect(probe.eventsDone, isTrue);
+      });
+    });
+
+    test('a 5xx authorization is retried with the subscribe policy', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        var calls = 0;
+        rig.authorizer.handler = (ChannelAuthorizationRequest request) {
+          calls++;
+          if (calls < 3) {
+            throw ReverbAuthorizationException('Down', channel: request.channel, statusCode: 503);
+          }
+          return ChannelAuthorization(auth: FakeChannelAuthorizer.signatureFor(request));
+        };
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        expect(calls, 1);
+        async.elapse(const Duration(seconds: 1));
+        expect(calls, 2);
+        async.elapse(const Duration(seconds: 2));
+        expect(calls, 3);
+        expect(probe.succeeded, isTrue);
+      });
+    });
+
+    test('authorization is aborted by cancel, by closeAll and by the attempt deadline', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig()..authorizer.hold = true;
+
+        final byCancel = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        unawaited(byCancel.subscription.cancel());
+        async.flushMicrotasks();
+        expect(rig.authorizer.cancelled, hasLength(1));
+
+        Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        unawaited(rig.client.closeAll());
+        async.flushMicrotasks();
+        expect(rig.authorizer.cancelled, hasLength(2));
+
+        final byDeadline = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 10));
+        expect(rig.authorizer.cancelled, hasLength(3));
+        expect(rig.reports.last.error, isA<ReverbTimeoutException>());
+        expect(rig.reports.last.willRetry, isTrue);
+
+        for (final socket in rig.connector.sockets) {
+          expect(socket.sentNamed(PusherEvents.subscribe), isEmpty);
+        }
+        expect(byDeadline.readyDone, isFalse);
+      });
+    });
+
+    test('an unanswered subscribe times out and is retried on the same socket', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(autoAcknowledge: false);
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        async.elapse(const Duration(seconds: 11));
+        expect(rig.subscribes(rig.connector.socket, _users), hasLength(2));
+        rig.connector.socket.acknowledge(_users);
+        async.flushMicrotasks();
+        expect(probe.succeeded, isTrue);
+        expect(rig.connector.sockets, hasLength(1));
+      });
+    });
+  });
 }
