@@ -228,6 +228,11 @@ final class ReverbClient {
   /// The channels with at least one live subscription, as a snapshot.
   List<String> get channels => List<String>.unmodifiable(_channels.keys);
 
+  /// Whether [dispose] has run. A disposed client answers every [subscribe]
+  /// with a failed subscription and every [connect] or [reconnect] with a
+  /// [ReverbConfigurationException].
+  bool get isDisposed => _disposed;
+
   /// Joins [channel]. Never throws.
   ///
   /// Problems that make the request impossible (an invalid name, a private

@@ -771,6 +771,7 @@ request's cancellation token, expose the socket's close code/reason, and close a
 | `reverb.connect()` | Open the socket before the first subscription and hold it open until one takes it over; completes once connected. |
 | `reverb.reconnect()` | Drop the socket and connect again at once, re-subscribing every live channel (failed ones included); completes once connected. |
 | `reverb.closeAll()` / `dispose()` | End every handle / permanently release the client as well. |
+| `reverb.isDisposed` | Whether `dispose()` has run. |
 | `subscription.channel` | Full wire channel name. |
 | `subscription.ready` / `isReady` | One-time readiness result / whether that result succeeded. |
 | `subscription.status` / `statusChanges` | Current status (`pending`, `subscribed`, `resubscribing`, `failed`, `cancelled`) / broadcast stream of changes. |

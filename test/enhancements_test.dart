@@ -299,4 +299,13 @@ void main() {
       });
     });
   });
+
+  test('isDisposed turns true as dispose starts', () {
+    fakeAsync((FakeAsync async) {
+      final rig = ClientRig();
+      expect(rig.client.isDisposed, isFalse);
+      unawaited(rig.client.dispose());
+      expect(rig.client.isDisposed, isTrue);
+    });
+  });
 }
