@@ -153,6 +153,8 @@ final class ReverbClient {
 
   final StreamController<ReverbConnectionState> _states = StreamController<ReverbConnectionState>.broadcast();
   final Map<String, _ChannelEntry> _channels = <String, _ChannelEntry>{};
+  final Map<String, int> _staleAcks = <String, int>{};
+  final List<Timer> _staleAckTimers = <Timer>[];
 
   ReverbConnectionState _state = ReverbConnectionState.disconnected;
   int _epoch = 0;
@@ -298,6 +300,7 @@ final class ReverbClient {
 
     final session = _session;
     if (_established && session != null) {
+      if (status == _EntryStatus.acknowledging) _addStaleAck(entry.name);
       if (status == _EntryStatus.acknowledging || status == _EntryStatus.subscribed || status == _EntryStatus.backoff) {
         session.send(PusherEvents.unsubscribe, data: <String, Object?>{'channel': entry.name});
       }
@@ -437,6 +440,7 @@ final class ReverbClient {
     _cycleAttempt = 0;
     _connectToken = null;
     _connectDeadline = null;
+    _clearStaleAcks();
     _setState(ReverbConnectionState.connected);
 
     unawaited(session.dropped.then((ReverbException cause) => _onDropped(session, cause)));
@@ -451,6 +455,7 @@ final class ReverbClient {
     if (!identical(session, _session) || !_established) return;
     _session = null;
     _established = false;
+    _clearStaleAcks();
     _resetEntries(cause);
 
     if (_channels.isEmpty) {
@@ -514,6 +519,7 @@ final class ReverbClient {
     final session = _session;
     _session = null;
     _established = false;
+    _clearStaleAcks();
     if (session != null) unawaited(session.close());
 
     _resetEntries(reason);
@@ -679,6 +685,7 @@ final class ReverbClient {
   }
 
   void _onSubscriptionSucceeded(String name, PusherFrame frame) {
+    if (_consumeStaleAck(name)) return;
     final entry = _channels[name];
     if (entry == null) return;
 
@@ -700,6 +707,7 @@ final class ReverbClient {
   }
 
   void _onSubscriptionError(String name, PusherFrame frame) {
+    if (_consumeStaleAck(name)) return;
     final entry = _channels[name];
     final attempt = entry?.current;
     if (entry == null || attempt == null || entry.status != _EntryStatus.acknowledging) return;
@@ -729,6 +737,49 @@ final class ReverbClient {
         userId: frame.userId,
       ),
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stale acknowledgements
+  // ---------------------------------------------------------------------------
+
+  /// A channel released while its `pusher:subscribe` was unacknowledged leaves
+  /// one slot: the answer to that frame is drained before a new entry of the
+  /// same name can take an acknowledgement. Slots expire after the
+  /// subscription timeout, so a frame the server never answers cannot starve
+  /// the name.
+  void _addStaleAck(String name) {
+    _staleAcks[name] = (_staleAcks[name] ?? 0) + 1;
+    late final Timer timer;
+    timer = Timer(options.subscriptionTimeout, () {
+      _staleAckTimers.remove(timer);
+      final count = _staleAcks[name] ?? 0;
+      if (count <= 1) {
+        _staleAcks.remove(name);
+      } else {
+        _staleAcks[name] = count - 1;
+      }
+    });
+    _staleAckTimers.add(timer);
+  }
+
+  bool _consumeStaleAck(String name) {
+    final count = _staleAcks[name] ?? 0;
+    if (count == 0) return false;
+    if (count == 1) {
+      _staleAcks.remove(name);
+    } else {
+      _staleAcks[name] = count - 1;
+    }
+    return true;
+  }
+
+  void _clearStaleAcks() {
+    for (final timer in _staleAckTimers) {
+      timer.cancel();
+    }
+    _staleAckTimers.clear();
+    _staleAcks.clear();
   }
 
   // ---------------------------------------------------------------------------

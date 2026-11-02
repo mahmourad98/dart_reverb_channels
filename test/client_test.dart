@@ -482,6 +482,31 @@ void main() {
       });
     });
 
+    test('an acknowledgement owed to a released channel is drained before the new one is ready', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(autoAcknowledge: false);
+        final keep = Probe(rig.client.subscribe(_other));
+        final first = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        rig.connector.socket.acknowledge(_other);
+        async.flushMicrotasks();
+        expect(keep.succeeded, isTrue);
+
+        unawaited(first.subscription.cancel());
+        final second = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        expect(rig.subscribes(rig.connector.socket, _users), hasLength(2));
+
+        rig.connector.socket.acknowledge(_users);
+        async.flushMicrotasks();
+        expect(second.readyDone, isFalse, reason: 'the first answer belongs to the released subscribe');
+
+        rig.connector.socket.acknowledge(_users);
+        async.flushMicrotasks();
+        expect(second.succeeded, isTrue);
+      });
+    });
+
     test('pusher:error on an established socket is reported and changes nothing', () {
       fakeAsync((FakeAsync async) {
         final rig = ClientRig();
