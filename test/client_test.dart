@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:dart_reverb_channels/testing.dart';
@@ -583,6 +584,93 @@ void main() {
         async.flushMicrotasks();
         expect(probe.succeeded, isTrue);
         expect(rig.connector.sockets, hasLength(1));
+      });
+    });
+  });
+
+  group('configuration problems', () {
+    test('an invalid name or a missing authorizer fail ready without touching the socket', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(withAuthorizer: false);
+        final invalid = Probe(rig.client.subscribe('bad name'));
+        final private = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        for (final probe in <Probe>[invalid, private]) {
+          expect(probe.readyError, isA<ReverbConfigurationException>());
+          expect(probe.eventsDone, isFalse);
+        }
+        expect(rig.connector.requests, isEmpty);
+      });
+    });
+
+    test('a disposed client answers every subscribe with a failed subscription', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        unawaited(rig.client.dispose());
+        async.flushMicrotasks();
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        expect(probe.readyError, isA<ReverbConfigurationException>());
+        expect(rig.connector.requests, isEmpty);
+      });
+    });
+
+    test('an idle timeout keeps the socket open until it elapses', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(options: testOptions.copyWith(idleTimeout: const Duration(seconds: 5)));
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        unawaited(probe.subscription.cancel());
+        async.elapse(const Duration(seconds: 4));
+        expect(rig.connector.socket.isClosed, isFalse);
+        final again = Probe(rig.client.subscribe(_users));
+        async.elapse(const Duration(seconds: 10));
+        expect(rig.connector.sockets, hasLength(1));
+        expect(again.succeeded, isTrue);
+      });
+    });
+  });
+
+  group('events', () {
+    test('payloads are decoded once whether they arrive as JSON strings, objects or plain values', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        final socket = rig.connector.socket;
+
+        socket.event(_users, 'a', <String, Object?>{'order_id': '7'});
+        socket.emit(<String, Object?>{
+          'event': 'b',
+          'channel': _users,
+          'data': <String, Object?>{'x': 1},
+        }, encodeData: false);
+        socket.event(_users, 'c', 'hello');
+        socket.emit(<String, Object?>{'event': 'd', 'channel': 'private-elsewhere', 'data': '{}'});
+        async.flushMicrotasks();
+
+        expect(probe.events.map((ReverbEvent e) => e.name), <String>['a', 'b', 'c']);
+        expect(probe.events[0].data, <String, dynamic>{'order_id': '7'});
+        expect(probe.events[0].rawData, jsonEncode(<String, Object?>{'order_id': '7'}));
+        expect(probe.events[1].data, <String, dynamic>{'x': 1});
+        expect(probe.events[2].data, <String, dynamic>{'data': 'hello'});
+      });
+    });
+
+    test('on() filters by event name', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final subscription = rig.client.subscribe(_users);
+        final names = <String>[];
+        subscription.on('wanted').listen((ReverbEvent e) => names.add(e.name));
+        async.flushMicrotasks();
+
+        rig.connector.socket
+          ..event(_users, 'unwanted', <String, Object?>{})
+          ..event(_users, 'wanted', <String, Object?>{});
+        async.flushMicrotasks();
+        expect(names, <String>['wanted']);
       });
     });
   });
