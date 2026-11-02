@@ -11,7 +11,8 @@ This guide describes version **1.0.0**, matching [the `v1.0.0` tag](https://gith
 - **Bounded, predictable retries.** You choose how many attempts the connection and each channel
   get, how long each may take and how long to wait between them.
 - **Automatic reconnect.** If an open socket drops, it reconnects and re-subscribes every live
-  channel with a fresh authorization. A keep-alive ping detects dead sockets.
+  channel with a fresh authorization. A keep-alive ping detects dead sockets, `reconnect()` retries
+  on demand, and every subscription reports when its channel drops and comes back.
 - **Everything is pluggable.** The socket transport (your own `HttpClient`, certificate pinning,
   `Origin` header), channel authorization (your HTTP stack and tokens), payload decryption, error
   reporting and logging are all injected.
@@ -436,15 +437,70 @@ You do not have to await `ready`: events flow as soon as the channel is subscrib
 an un-awaited failure is never reported as an uncaught error.
 
 `ready` completes once; `isReady` stays true after that success, even during a later disconnect.
-Neither indicates current channel readiness. `reverb.state == ReverbConnectionState.connected` means the socket handshake
-succeeded; individual channels may still be authorizing.
+Neither indicates current channel readiness: `subscription.status` does (see step 5).
+`reverb.state == ReverbConnectionState.connected` means the socket handshake succeeded; individual
+channels may still be authorizing.
 
 To show connection status, start with `reverb.state` and listen to `reverb.states` for subsequent
 changes (`connecting`, `connected`, `reconnecting`, `unavailable`, `failed`, `paused`,
 `disconnected`). The broadcast stream does not replay the current state. Cancel that listener
 when its owner ends.
 
-### 5. Pause in the background (recommended on mobile)
+### 5. Follow a channel after `ready` (when you must not miss an event)
+
+`ready` reports only the first outcome. After that, a subscription's `status` follows its channel:
+
+| `status` | Meaning |
+|---|---|
+| `pending` | Not subscribed yet (connecting, authorizing, retrying). |
+| `subscribed` | Events are delivered. |
+| `resubscribing` | It was subscribed; the socket dropped (or `reconnect()` / `pause()` ran) and the channel is being subscribed again. |
+| `failed` | The attempts ran out or a failure was fatal; `subscription.error` says why. It recovers when the channel is subscribed again. |
+| `cancelled` | `cancel()` or `closeAll()` ended it. |
+
+Events published while a channel is not subscribed are lost (Reverb does not replay them). When
+`statusChanges` reports `subscribed` after `resubscribing` or `failed`, re-read what you may have
+missed:
+
+```dart
+ReverbSubscriptionStatus previous = subscription.status;
+final statusListener = subscription.statusChanges.listen((ReverbSubscriptionStatus status) {
+  final cameBack = status == ReverbSubscriptionStatus.subscribed &&
+      (previous == ReverbSubscriptionStatus.resubscribing || previous == ReverbSubscriptionStatus.failed);
+  if (cameBack) refreshOrderFromApi(); // events published during the gap did not arrive
+  if (status == ReverbSubscriptionStatus.failed) showOfflineBanner(subscription.error);
+  previous = status;
+});
+```
+
+`statusChanges` does not replay the current status; read `subscription.status` first. It is done
+after `cancel()` or `closeAll()`; cancel the listener when its owner ends.
+
+### 6. Reconnect on demand
+
+When a cycle runs out of attempts (`unavailable`), nothing retries on its own until the next
+`subscribe`. `reconnect()` drops the socket, connects again at once with a fresh set of attempts and
+re-subscribes every live channel, failed ones included. Call it when connectivity returns or from a
+retry button:
+
+```dart
+// With package:connectivity_plus:
+Connectivity().onConnectivityChanged.listen((List<ConnectivityResult> results) {
+  if (!results.contains(ConnectivityResult.none)) reverb.reconnect();
+});
+
+// Or await it behind a retry button:
+try {
+  await reverb.reconnect(); // completes once connected
+} on ReverbException catch (error) {
+  // The new cycle ran out of attempts too.
+}
+```
+
+Awaiting it is optional; an unawaited failure is never reported as an uncaught error. While the
+client is paused it does nothing (`resume()` reconnects).
+
+### 7. Pause in the background (recommended on mobile)
 
 iOS silently kills sockets of suspended apps. Let the client close the socket in the background and
 reconnect in the foreground:
@@ -467,7 +523,7 @@ Subscriptions survive the pause; their channels are re-subscribed on resume. Eve
 paused are not replayed (see [How it behaves](#how-it-behaves)). Detaching only removes the lifecycle
 observer; dispose the client separately.
 
-### 6. Log out and dispose
+### 8. Log out and dispose
 
 On logout, end every subscription so nothing re-authorizes with the old user's token:
 
@@ -681,9 +737,12 @@ request's cancellation token, expose the socket's close code/reason, and close a
 | `reverb.socketId` | Current socket id, or `null` without an established socket. Changes on reconnect. |
 | `reverb.channels` | Unmodifiable snapshot of channel names with live handles, including pending/failed ones. |
 | `reverb.pause()` / `resume()` | Close and keep handles / reconnect after an explicit pause. |
+| `reverb.reconnect()` | Drop the socket and connect again at once, re-subscribing every live channel (failed ones included); completes once connected. |
 | `reverb.closeAll()` / `dispose()` | End every handle / permanently release the client as well. |
 | `subscription.channel` | Full wire channel name. |
 | `subscription.ready` / `isReady` | One-time readiness result / whether that result succeeded. |
+| `subscription.status` / `statusChanges` | Current status (`pending`, `subscribed`, `resubscribing`, `failed`, `cancelled`) / broadcast stream of changes. |
+| `subscription.error` | The failure behind `failed`; `null` in any other status. |
 | `subscription.events` / `on(name)` | All delivered events / exact-name filter, both broadcast streams. |
 | `subscription.members` / `me` | Presence roster / own member; empty or `null` when unavailable. |
 | `subscription.trigger(name, data)` | Attempt a client event on a private/presence channel. |
@@ -699,22 +758,26 @@ Read it at request time, since it changes after reconnecting. The event must use
 1. `subscribe` never throws. Problems such as an invalid channel name or a private channel without
    an authorizer come back as a subscription whose `ready` fails with
    `ReverbConfigurationException`.
-2. `ready` completes exactly once. A later reconnect does not change it.
+2. `ready` completes exactly once, with the first outcome. Everything after it (a drop, a
+   re-subscription, a failure after `ready`) shows in `status` and `statusChanges`.
 3. `events` is a broadcast stream. It ends only after `cancel()` or `closeAll()`, and delivers
    nothing after cancellation. The stream does not buffer or replay events for listeners added later.
-   Failures are delivered through `ready` / `onError`, rather than stream errors.
-4. A connection cycle gets `connectRetry` attempts. If they all fail, every pending `ready` fails
-   and the socket stays closed; the next `subscribe` starts a fresh cycle.
-   A channel that exhausts its own retries stays idle until a new handle for that channel or a new
-   socket starts fresh attempts. Retained handles can receive again if the channel recovers, but
-   an already-failed `ready` remains failed. Cancel and subscribe again for a new readiness result.
+   Failures are delivered through `ready`, `status` / `error` and `onError`, rather than stream errors.
+4. A connection cycle gets `connectRetry` attempts. If they all fail, every pending `ready` fails,
+   every subscription reads `failed` and the socket stays closed; the next `subscribe`, or
+   `reconnect()`, starts a fresh cycle. A channel that exhausts its own retries stays `failed` until
+   a new handle for that channel, a new socket or `reconnect()` starts fresh attempts. Retained
+   handles receive again when the channel recovers, and `statusChanges` reports it; an
+   already-failed `ready` remains failed.
 5. If an open socket drops, a new cycle starts at once (after `reconnectBackoff` for 4100–4199) and
-   every live channel is re-subscribed with fresh authorization. Close codes 4000–4099 mean "do not
-   reconnect".
+   every live channel is re-subscribed with fresh authorization; its subscriptions read
+   `resubscribing` until then. Close codes 4000–4099 mean "do not reconnect".
 6. After `activity_timeout` of silence the client sends `pusher:ping`. No answer within
    `pongTimeout` counts as a drop. The `pinging` debug line is this keep-alive, not a problem.
 7. Events published while the socket is down are lost: Reverb does not replay them. If you must
-   not miss an outcome, bound your wait with a timeout and re-check through your API.
+   not miss an outcome, re-check through your API when `statusChanges` reports the channel back
+   (see [step 5](#5-follow-a-channel-after-ready-when-you-must-not-miss-an-event)), and bound your
+   wait with a timeout.
 8. `cancel`, `closeAll` and a new socket make any work still in flight for the old state (an
    authorization request, a late acknowledgement, a retry timer) do nothing.
 
