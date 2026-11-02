@@ -405,6 +405,25 @@ void main() {
         expect(rig.connector.socket.sentNamed(PusherEvents.pong), hasLength(1));
       });
     });
+
+    test('pause closes the socket and keeps subscriptions; resume resubscribes them', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        rig.client.pause();
+        async.flushMicrotasks();
+        expect(rig.connector.socket.closedByClient, isTrue);
+        expect(rig.client.state, ReverbConnectionState.paused);
+        expect(probe.eventsDone, isFalse);
+
+        rig.client.resume();
+        async.flushMicrotasks();
+        expect(rig.connector.requests, hasLength(2));
+        expect(rig.subscribes(rig.connector.socket, _users), hasLength(1));
+      });
+    });
   });
 
   group('channel attempts', () {

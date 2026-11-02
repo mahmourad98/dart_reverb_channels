@@ -160,6 +160,7 @@ final class ReverbClient {
   int _epoch = 0;
   int _generations = 0;
   bool _disposed = false;
+  bool _paused = false;
 
   ReverbSession? _session;
   bool _established = false;
@@ -240,7 +241,28 @@ final class ReverbClient {
       }
       entry.subscriptions.clear();
     }
-    _setState(ReverbConnectionState.disconnected);
+    if (!_paused) _setState(ReverbConnectionState.disconnected);
+  }
+
+  /// Closes the socket but keeps every subscription, for an app going to the
+  /// background (iOS silently kills sockets an app is not watching). Pending
+  /// `ready` futures keep waiting. [resume] reconnects.
+  void pause() {
+    if (_disposed || _paused) return;
+    _paused = true;
+    _closeSocket(const ReverbCancelledException('Client paused'));
+    _setState(ReverbConnectionState.paused);
+  }
+
+  /// Reconnects after [pause] when channels are live.
+  void resume() {
+    if (_disposed || !_paused) return;
+    _paused = false;
+    if (_channels.isEmpty) {
+      _setState(ReverbConnectionState.disconnected);
+    } else {
+      _startCycle(firstDelay: Duration.zero, reconnecting: true);
+    }
   }
 
   /// [closeAll], then releases the state stream. The client is unusable after.
@@ -273,6 +295,10 @@ final class ReverbClient {
   }
 
   void _activate(_ChannelEntry entry) {
+    if (_paused) {
+      entry.status = _EntryStatus.waiting;
+      return;
+    }
     if (_established) {
       _startChannelAttempt(entry, fresh: true);
     } else {
@@ -330,7 +356,7 @@ final class ReverbClient {
   // ---------------------------------------------------------------------------
 
   void _startCycle({required Duration firstDelay, required bool reconnecting}) {
-    if (_disposed) return;
+    if (_disposed || _paused) return;
     _epoch++;
     _cycleRunning = true;
     _cycleAttempt = 0;
@@ -464,7 +490,7 @@ final class ReverbClient {
     }
 
     final fatal = cause is ReverbProtocolException && cause.isFatal;
-    final reconnect = options.reconnect && !fatal;
+    final reconnect = options.reconnect && !fatal && !_paused;
     final epoch = _epoch;
     _report(
       ReverbErrorReport(
@@ -523,7 +549,7 @@ final class ReverbClient {
     if (session != null) unawaited(session.close());
 
     _resetEntries(reason);
-    if (_channels.isEmpty) _setState(ReverbConnectionState.disconnected);
+    if (!_paused && _channels.isEmpty) _setState(ReverbConnectionState.disconnected);
   }
 
   /// Every remaining channel waits for the next socket.
