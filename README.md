@@ -1020,7 +1020,12 @@ flutter pub get
 dart format --output=none --set-exit-if-changed lib test example
 flutter analyze
 flutter test
+flutter test --platform chrome
 ```
+
+The last command runs the suite compiled for the web, as CI's Chrome job does; tests marked
+`@TestOn('vm')` (the `dart:io` transport and the version check that reads `pubspec.yaml`) are
+skipped there. Set `CHROME_EXECUTABLE` if Chrome is not on its default path.
 
 CI resolves both `flutter pub upgrade` and `flutter pub downgrade` to check the declared dependency
 ranges. The tests include fake-socket behavior, local WebSocket transport tests, HTTP authorization,
