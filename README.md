@@ -27,6 +27,8 @@ This guide describes version **1.0.0**, matching [the `v1.0.0` tag](https://gith
 5. [Event names](#event-names)
 6. [Presence channels and client events](#presence-channels-and-client-events)
 7. [Encrypted channels](#encrypted-channels)
+8. [Configuration reference](#configuration-reference)
+9. [How it behaves](#how-it-behaves)
 
 ## Requirements
 
@@ -589,3 +591,122 @@ An event that fails to decrypt is dropped and reported through `onError` as a
 `ReverbDecryptionException`. There is no automatic key refresh/retry on decryption failure;
 fresh authorization happens on a new subscription attempt or socket. Client events are not
 supported on encrypted channels.
+
+## Configuration reference
+
+`ReverbOptions` is immutable; derive variants with `copyWith`. Null arguments to `copyWith`
+preserve existing values, so construct new options to clear `port`, `socketPath`, `headersBuilder`
+or `retryIf`. A client's `options` are final; create another client to change its configuration.
+The constructor validates options and can throw `ArgumentError` before any subscription.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `host`, `appKey` | required | Server host (no scheme) and `REVERB_APP_KEY`. |
+| `port` | 443 (80 without TLS) | Server port. |
+| `useTls` | `true` | `wss` when true, `ws` when false (local development). |
+| `pathPrefix` | `''` | Reverb's `REVERB_SERVER_PATH`, for a server behind a proxy path (`/ws` → `/ws/app/{key}`). |
+| `socketPath` | none | Replaces the whole socket path; include any required app key yourself. |
+| `protocolVersion` | `7` | `protocol` query parameter. |
+| `clientName` | `dart_reverb_channels` | `client` query parameter. |
+| `clientVersion` | `1.0.0` | `version` query parameter; exported as `dartReverbChannelsVersion`. |
+| `queryParameters` | `{}` | Extra URL parameters; duplicate keys override `protocol`, `client` or `version`. |
+| `headers` | `{}` | Headers for the WebSocket upgrade, such as `Origin`. |
+| `headersBuilder` | none | Headers built per connection attempt, merged over `headers`. |
+| `connectTimeout` | 10 s | One connection attempt: socket, upgrade and handshake. |
+| `subscriptionTimeout` | 10 s | One channel attempt: authorization and the server's acknowledgement. |
+| `connectRetry` | 3 attempts, 1 s then 2 s | Attempts per connection cycle, including the first. |
+| `subscribeRetry` | 3 attempts, 1 s then 2 s | Attempts per channel. |
+| `retryIf` | `error.isRetryable` | Decides which failures are retried. |
+| `activityTimeout` | 120 s | The longest silence before a keep-alive ping; the server's shorter `activity_timeout` wins. |
+| `pongTimeout` | 30 s | How long a ping may go unanswered before the socket counts as dead. |
+| `reconnect` | `true` | Reconnect and re-subscribe after an open socket drops. |
+| `reconnectBackoff` | 1 s | Wait before reconnecting after a 4100–4199 close (server asked to back off). |
+| `closeWhenIdle` | `true` | Close the socket once no channel is left. |
+| `idleTimeout` | 0 s | With `closeWhenIdle`, how long an idle socket stays open first. |
+
+`options.socketUri` shows the resulting URL, normally
+`wss://ws.example.com:443/app/your-reverb-app-key?protocol=7&client=dart_reverb_channels&version=1.0.0`.
+Use `pathPrefix: '/ws'` for `/ws/app/{key}`; `socketPath` replaces that entire path.
+
+### Retry policies
+
+`RetryPolicy.none` allows one attempt. `RetryPolicy(maxAttempts: 3, delays: [...])` counts the
+first attempt as 1; the last delay repeats, and an empty delay list retries immediately. Set
+`maxAttempts: null` for no attempt limit. `jitter` adds a random fraction of the base delay.
+
+For example, give each connection cycle five attempts, without retrying channel authorization:
+
+```dart
+final options = ReverbOptions(
+  host: 'ws.example.com',
+  appKey: 'your-reverb-app-key',
+  connectRetry: RetryPolicy.exponential(maxAttempts: 5),
+  subscribeRetry: RetryPolicy.none,
+);
+```
+
+`RetryPolicy.exponential()` defaults to unlimited attempts, doubling from 1 s to a 30 s base
+delay, with up to 25% extra jitter. Pass `maxAttempts` to keep it bounded.
+`retryIf` replaces the default retry predicate for connection/channel attempts; fatal protocol
+codes 4000–4099 still prohibit reconnecting. The initial reconnect after an established socket
+drops is controlled by `reconnect` and the close code, not by `retryIf`.
+
+### Transport and client hooks
+
+Native transport (`IOWebSocketConnector`) options: `httpClientFactory` (your `HttpClient`, for
+example with a pinned `SecurityContext`), `pingInterval` (WebSocket-level pings for aggressive
+proxies) and `compression`. Its factory must return a fresh `HttpClient` per connection attempt;
+the connector closes it after the upgrade or on cancellation.
+
+The `ReverbClient` constructor also accepts `authorizer`, `decrypter`, `onError`, `onLog` and an
+optional `math.Random` (`random`) for repeatable retry jitter in tests. For a custom transport,
+implement `ReverbConnector.connect(ReverbConnectRequest)` and return a `ReverbSocket`. Honor the
+request's cancellation token, expose the socket's close code/reason, and close abandoned sockets.
+`WebSocketChannelConnector(factory: ...)` / `WebSocketChannelSocket` adapt an existing
+`web_socket_channel` transport.
+
+### Client and subscription reference
+
+| Member | Behavior |
+|---|---|
+| `reverb.subscribe(channel)` | Returns a new owner handle; shares the wire subscription with other owners. |
+| `reverb.state` / `states` | Current connection state / broadcast stream of changes. |
+| `reverb.socketId` | Current socket id, or `null` without an established socket. Changes on reconnect. |
+| `reverb.channels` | Unmodifiable snapshot of channel names with live handles, including pending/failed ones. |
+| `reverb.pause()` / `resume()` | Close and keep handles / reconnect after an explicit pause. |
+| `reverb.closeAll()` / `dispose()` | End every handle / permanently release the client as well. |
+| `subscription.channel` | Full wire channel name. |
+| `subscription.ready` / `isReady` | One-time readiness result / whether that result succeeded. |
+| `subscription.events` / `on(name)` | All delivered events / exact-name filter, both broadcast streams. |
+| `subscription.members` / `me` | Presence roster / own member; empty or `null` when unavailable. |
+| `subscription.trigger(name, data)` | Attempt a client event on a private/presence channel. |
+| `subscription.cancel()` / `isCancelled` | Release this handle / whether it has ended. |
+
+For Laravel's `toOthers()`, send the current `reverb.socketId` as `X-Socket-ID` on the **HTTP
+request that triggers the broadcast**. This package does not add it to your API requests.
+Read it at request time, since it changes after reconnecting. The event must use Laravel's
+`InteractsWithSockets` trait; see [Only to Others](https://laravel.com/docs/12.x/broadcasting#only-to-others).
+
+## How it behaves
+
+1. `subscribe` never throws. Problems such as an invalid channel name or a private channel without
+   an authorizer come back as a subscription whose `ready` fails with
+   `ReverbConfigurationException`.
+2. `ready` completes exactly once. A later reconnect does not change it.
+3. `events` is a broadcast stream. It ends only after `cancel()` or `closeAll()`, and delivers
+   nothing after cancellation. The stream does not buffer or replay events for listeners added later.
+   Failures are delivered through `ready` / `onError`, rather than stream errors.
+4. A connection cycle gets `connectRetry` attempts. If they all fail, every pending `ready` fails
+   and the socket stays closed; the next `subscribe` starts a fresh cycle.
+   A channel that exhausts its own retries stays idle until a new handle for that channel or a new
+   socket starts fresh attempts. Retained handles can receive again if the channel recovers, but
+   an already-failed `ready` remains failed. Cancel and subscribe again for a new readiness result.
+5. If an open socket drops, a new cycle starts at once (after `reconnectBackoff` for 4100–4199) and
+   every live channel is re-subscribed with fresh authorization. Close codes 4000–4099 mean "do not
+   reconnect".
+6. After `activity_timeout` of silence the client sends `pusher:ping`. No answer within
+   `pongTimeout` counts as a drop. The `pinging` debug line is this keep-alive, not a problem.
+7. Events published while the socket is down are lost: Reverb does not replay them. If you must
+   not miss an outcome, bound your wait with a timeout and re-check through your API.
+8. `cancel`, `closeAll` and a new socket make any work still in flight for the old state (an
+   authorization request, a late acknowledgement, a retry timer) do nothing.
