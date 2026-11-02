@@ -77,3 +77,17 @@ final class Probe {
 
   Future<void> dispose() => _listener.cancel();
 }
+
+/// Records a subscription's status changes.
+final class StatusLog {
+  StatusLog(this.subscription) {
+    _listener = subscription.statusChanges.listen(changes.add, onDone: () => done = true);
+  }
+
+  final ReverbSubscription subscription;
+  final List<ReverbSubscriptionStatus> changes = <ReverbSubscriptionStatus>[];
+  late final StreamSubscription<ReverbSubscriptionStatus> _listener;
+  bool done = false;
+
+  Future<void> dispose() => _listener.cancel();
+}

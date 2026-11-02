@@ -79,6 +79,15 @@ final class _ChannelEntry {
   String? myId;
   final Map<String, PresenceMember> members = <String, PresenceMember>{};
 
+  /// Moves the channel to [next] and mirrors it on every owner. The only way
+  /// [status] changes, so subscriptions never miss a transition.
+  void setStatus(_EntryStatus next, [ReverbException? failure]) {
+    status = next;
+    for (final subscription in List<ReverbSubscription>.of(subscriptions)) {
+      subscription._follow(next, failure);
+    }
+  }
+
   void stopAttempt(ReverbException reason) {
     current?.cancel(reason);
     current = null;
@@ -120,7 +129,9 @@ final class _ChannelEntry {
 ///   it.
 /// - **Reconnect and resubscribe.** After an established socket drops, a new
 ///   cycle runs and every live channel resubscribes with fresh authorization.
-///   Events published while disconnected are not replayed.
+///   Events published while disconnected are not replayed: each
+///   subscription's [ReverbSubscription.statusChanges] shows when its channel
+///   came back.
 /// - **Pluggable edges.** The transport ([ReverbConnector]), authorization
 ///   ([ChannelAuthorizer]), decryption ([ReverbChannelDecrypter]), error
 ///   reporting and logging are all injected.
@@ -224,6 +235,7 @@ final class ReverbClient {
     _join(existing, subscription);
     switch (existing.status) {
       case _EntryStatus.subscribed:
+        subscription._follow(_EntryStatus.subscribed);
         subscription._succeed();
       case _EntryStatus.failed:
         // A new owner asks again: the channel gets a fresh set of attempts.
@@ -309,13 +321,13 @@ final class ReverbClient {
 
   void _activate(_ChannelEntry entry) {
     if (_paused) {
-      entry.status = _EntryStatus.waiting;
+      entry.setStatus(_EntryStatus.waiting);
       return;
     }
     if (_established) {
       _startChannelAttempt(entry, fresh: true);
     } else {
-      entry.status = _EntryStatus.waiting;
+      entry.setStatus(_EntryStatus.waiting);
       if (!_cycleRunning) _startCycle(firstDelay: Duration.zero, reconnecting: false);
     }
   }
@@ -538,7 +550,8 @@ final class ReverbClient {
   }
 
   /// The cycle ran out or hit a fatal failure: pending `ready` futures fail,
-  /// the socket stays idle, live subscriptions stay open and silent. The next
+  /// every subscription becomes [ReverbSubscriptionStatus.failed], the socket
+  /// stays idle and live subscriptions stay open and silent. The next
   /// [subscribe] starts a new cycle.
   void _onCycleExhausted(ReverbException failure, StackTrace? stackTrace) {
     _cycleRunning = false;
@@ -548,7 +561,7 @@ final class ReverbClient {
     _setState(fatal ? ReverbConnectionState.failed : ReverbConnectionState.unavailable);
     for (final entry in _channels.values.toList()) {
       entry.stopAttempt(failure);
-      entry.status = _EntryStatus.failed;
+      entry.setStatus(_EntryStatus.failed, failure);
       entry.fail(failure, stackTrace);
     }
   }
@@ -578,13 +591,14 @@ final class ReverbClient {
     if (!_paused && _channels.isEmpty) _setState(ReverbConnectionState.disconnected);
   }
 
-  /// Every remaining channel waits for the next socket.
+  /// Every remaining channel waits for the next socket; a failed one stays
+  /// failed until that socket retries it.
   void _resetEntries(ReverbException reason) {
-    for (final entry in _channels.values) {
+    for (final entry in _channels.values.toList()) {
       entry.stopAttempt(reason);
       entry.members.clear();
       entry.myId = null;
-      if (entry.status != _EntryStatus.failed) entry.status = _EntryStatus.waiting;
+      if (entry.status != _EntryStatus.failed) entry.setStatus(_EntryStatus.waiting);
     }
   }
 
@@ -602,7 +616,7 @@ final class ReverbClient {
     final session = _session;
     final socketId = session?.socketId;
     if (!_established || session == null || socketId == null) {
-      entry.status = _EntryStatus.waiting;
+      entry.setStatus(_EntryStatus.waiting);
       return;
     }
 
@@ -630,7 +644,7 @@ final class ReverbClient {
       return;
     }
 
-    entry.status = _EntryStatus.authorizing;
+    entry.setStatus(_EntryStatus.authorizing);
     unawaited(_authorize(entry, attempt, socketId));
   }
 
@@ -668,7 +682,7 @@ final class ReverbClient {
   void _sendSubscribe(_ChannelEntry entry, _ChannelAttempt attempt, ChannelAuthorization? authorization) {
     entry.sharedSecret = authorization?.sharedSecret;
     entry.channelData = authorization?.channelData;
-    entry.status = _EntryStatus.acknowledging;
+    entry.setStatus(_EntryStatus.acknowledging);
     _session!.send(
       PusherEvents.subscribe,
       data: <String, Object?>{
@@ -712,12 +726,12 @@ final class ReverbClient {
     if (epoch != _epoch || !identical(_channels[entry.name], entry)) return;
 
     if (!retry) {
-      entry.status = _EntryStatus.failed;
+      entry.setStatus(_EntryStatus.failed, failure);
       entry.fail(failure, stackTrace);
       return;
     }
 
-    entry.status = _EntryStatus.backoff;
+    entry.setStatus(_EntryStatus.backoff);
     entry.retryTimer = Timer(options.subscribeRetry.delayAfter(attempt.number, _random), () {
       entry.retryTimer = null;
       if (epoch != _epoch || !identical(_channels[entry.name], entry) || entry.status != _EntryStatus.backoff) return;
@@ -770,9 +784,9 @@ final class ReverbClient {
     if (entry.status != _EntryStatus.acknowledging && entry.status != _EntryStatus.backoff) return;
 
     entry.stopAttempt(const ReverbCancelledException('Acknowledged'));
-    entry.status = _EntryStatus.subscribed;
     entry.attempts = 0;
     if (entry.kind == ReverbChannelKind.presence) _seedPresence(entry, frame.decodedData);
+    entry.setStatus(_EntryStatus.subscribed);
     _log(ReverbLogLevel.debug, 'subscribed to $name');
     entry.succeed();
   }

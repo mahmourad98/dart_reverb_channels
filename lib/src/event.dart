@@ -175,3 +175,33 @@ enum ReverbConnectionState {
   /// background. `ReverbClient.resume` reconnects.
   paused,
 }
+
+/// Where one subscription stands, from `ReverbSubscription.status`.
+///
+/// A subscription starts [pending] and becomes [subscribed]. When its socket
+/// drops it moves to [resubscribing], or to [failed] if the attempts run out,
+/// and back to [subscribed] once the channel is subscribed again; [cancelled]
+/// ends it. Every [subscribed] that follows [resubscribing] or [failed] marks
+/// a gap: events published meanwhile were not delivered.
+enum ReverbSubscriptionStatus {
+  /// Not subscribed yet: waiting for a socket, authorizing, waiting for the
+  /// server's acknowledgement, or waiting between attempts.
+  pending,
+
+  /// Subscribed: events are delivered.
+  subscribed,
+
+  /// It was subscribed, and the channel is being subscribed again because the
+  /// socket dropped or the client was paused.
+  /// Nothing is delivered until it is [subscribed] again.
+  resubscribing,
+
+  /// Not subscribed, and no attempt is running: the attempts ran out or a
+  /// failure was fatal (`ReverbSubscription.error` holds it). Not final: the
+  /// subscription recovers when its channel is subscribed again, after a new
+  /// connection cycle or a new subscriber of the same channel.
+  failed,
+
+  /// Ended by `ReverbSubscription.cancel` or `ReverbClient.closeAll`. Final.
+  cancelled,
+}

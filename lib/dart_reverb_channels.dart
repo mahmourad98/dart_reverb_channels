@@ -36,7 +36,8 @@ export 'src/event.dart'
         ReverbErrorStage,
         ReverbEvent,
         ReverbLogLevel,
-        ReverbLogRecord;
+        ReverbLogRecord,
+        ReverbSubscriptionStatus;
 export 'src/exceptions.dart';
 export 'src/options.dart'
     show dartReverbChannelsVersion, ReverbHeadersBuilder, ReverbOptions, ReverbRetryPredicate, RetryPolicy;

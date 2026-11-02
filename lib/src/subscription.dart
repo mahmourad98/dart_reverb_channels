@@ -12,9 +12,12 @@ final class ReverbSubscription {
   }
 
   /// A subscription that failed before it was made: [ready] fails with
-  /// [error], [events] stays open and silent until [cancel].
+  /// [error], [status] stays [ReverbSubscriptionStatus.failed] and [events]
+  /// stays open and silent until [cancel].
   ReverbSubscription._failed(this.channel, ReverbException error) : _client = null {
     _ready.future.ignore();
+    _status = ReverbSubscriptionStatus.failed;
+    _error = error;
     _fail(error);
   }
 
@@ -27,14 +30,18 @@ final class ReverbSubscription {
   final Completer<void> _ready = Completer<void>();
   final StreamController<ReverbEvent> _controller = StreamController<ReverbEvent>.broadcast();
   late final Stream<ReverbEvent> _events = _controller.stream.where((_) => !_cancelled);
+  final StreamController<ReverbSubscriptionStatus> _statuses = StreamController<ReverbSubscriptionStatus>.broadcast();
   bool _cancelled = false;
   bool _succeeded = false;
+  bool _wasSubscribed = false;
+  ReverbSubscriptionStatus _status = ReverbSubscriptionStatus.pending;
+  ReverbException? _error;
 
-  /// Completes once the channel is subscribed, or with the [ReverbException]
-  /// that ended the attempts: the retry policy ran out, a failure was fatal,
-  /// or [cancel] / [ReverbClient.closeAll] came first
-  /// ([ReverbCancelledException]). It completes once; a later drop and
-  /// resubscribe do not change it.
+  /// Completes the first time the channel is subscribed, or with the
+  /// [ReverbException] that ended the first attempts: the retry policy ran
+  /// out, a failure was fatal, or [cancel] / [ReverbClient.closeAll] came
+  /// first ([ReverbCancelledException]). It completes once; [status] and
+  /// [statusChanges] follow everything after it.
   Future<void> get ready => _ready.future;
 
   /// Whether [ready] completed successfully.
@@ -43,9 +50,28 @@ final class ReverbSubscription {
   /// Whether [cancel] or [ReverbClient.closeAll] ended this subscription.
   bool get isCancelled => _cancelled;
 
-  /// The channel's events, as a broadcast stream. It is done only after
-  /// [cancel] or [ReverbClient.closeAll], and delivers nothing after either.
-  /// A failed subscription keeps it open and silent.
+  /// Where this subscription stands now. See [ReverbSubscriptionStatus].
+  ReverbSubscriptionStatus get status => _status;
+
+  /// Every change of [status], as a broadcast stream. It does not repeat the
+  /// current value (read [status] for that). It is done after [cancel] or
+  /// [ReverbClient.closeAll], with [ReverbSubscriptionStatus.cancelled] last.
+  ///
+  /// A [ReverbSubscriptionStatus.subscribed] that follows
+  /// [ReverbSubscriptionStatus.resubscribing] or
+  /// [ReverbSubscriptionStatus.failed] means the channel came back after a
+  /// gap: events published meanwhile were not delivered, so re-read any state
+  /// you build from them.
+  Stream<ReverbSubscriptionStatus> get statusChanges => _statuses.stream;
+
+  /// The failure behind [ReverbSubscriptionStatus.failed]; null in any other
+  /// status.
+  ReverbException? get error => _status == ReverbSubscriptionStatus.failed ? _error : null;
+
+  /// The channel's events, as a broadcast stream. Events arrive while
+  /// [status] is [ReverbSubscriptionStatus.subscribed]; in any other status
+  /// the stream stays open and silent. It is done only after [cancel] or
+  /// [ReverbClient.closeAll], and delivers nothing after either.
   Stream<ReverbEvent> get events => _events;
 
   /// The events named [event].
@@ -80,8 +106,8 @@ final class ReverbSubscription {
   }
 
   /// Ends this subscription: fails a pending [ready] with
-  /// [ReverbCancelledException], ends [events] and releases the channel.
-  /// Calling it again does nothing.
+  /// [ReverbCancelledException], ends [events] and [statusChanges] and
+  /// releases the channel. Calling it again does nothing.
   Future<void> cancel() async {
     if (_cancelled) return;
     _terminate(const ReverbCancelledException('Subscription cancelled'));
@@ -104,10 +130,34 @@ final class ReverbSubscription {
     _controller.add(event);
   }
 
+  /// Mirrors the channel's state, as this owner sees it: an owner that was
+  /// never subscribed is still pending where an earlier owner resubscribes.
+  void _follow(_EntryStatus status, [ReverbException? failure]) {
+    switch (status) {
+      case _EntryStatus.subscribed:
+        _setStatus(ReverbSubscriptionStatus.subscribed);
+      case _EntryStatus.failed:
+        _setStatus(ReverbSubscriptionStatus.failed, failure);
+      case _EntryStatus.waiting || _EntryStatus.authorizing || _EntryStatus.acknowledging || _EntryStatus.backoff:
+        _setStatus(_wasSubscribed ? ReverbSubscriptionStatus.resubscribing : ReverbSubscriptionStatus.pending);
+    }
+  }
+
+  void _setStatus(ReverbSubscriptionStatus next, [ReverbException? failure]) {
+    if (_cancelled) return;
+    if (failure != null) _error = failure;
+    if (next == _status) return;
+    _status = next;
+    if (next == ReverbSubscriptionStatus.subscribed) _wasSubscribed = true;
+    if (!_statuses.isClosed) _statuses.add(next);
+  }
+
   void _terminate(ReverbException reason) {
     if (_cancelled) return;
+    _setStatus(ReverbSubscriptionStatus.cancelled);
     _cancelled = true;
     _fail(reason);
     unawaited(_controller.close());
+    unawaited(_statuses.close());
   }
 }
