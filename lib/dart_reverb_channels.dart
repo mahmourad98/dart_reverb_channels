@@ -9,4 +9,5 @@
 /// `IOWebSocketConnector`; tests import `package:dart_reverb_channels/testing.dart`.
 library;
 
+export 'src/cancel_token.dart' show ReverbCancelToken;
 export 'src/exceptions.dart';
