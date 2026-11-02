@@ -10,6 +10,14 @@
 library;
 
 export 'src/cancel_token.dart' show ReverbCancelToken;
+export 'src/connector.dart'
+    show
+        ReverbConnectRequest,
+        ReverbConnector,
+        ReverbSocket,
+        WebSocketChannelConnector,
+        WebSocketChannelFactory,
+        WebSocketChannelSocket;
 export 'src/event.dart'
     show
         PresenceMember,
