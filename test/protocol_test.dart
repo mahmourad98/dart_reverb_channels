@@ -4,6 +4,62 @@ import 'package:dart_reverb_channels/dart_reverb_channels.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  group('decodePusherData', () {
+    test('decodes JSON object strings once and keeps maps', () {
+      expect(decodePusherData('{"order_id":9}'), <String, dynamic>{'order_id': 9});
+      expect(decodePusherData(<String, Object?>{'a': 1}), <String, dynamic>{'a': 1});
+      expect(decodePusherData(<Object?, Object?>{1: 'x'}), <String, dynamic>{'1': 'x'});
+    });
+
+    test('reads data-less frames as an empty map', () {
+      expect(decodePusherData(null), isEmpty);
+      expect(decodePusherData(''), isEmpty);
+      expect(PusherFrame.parse('{"event":"pusher:pong"}').decodedData, isEmpty);
+    });
+
+    test('wraps everything else under data', () {
+      expect(decodePusherData('hello'), <String, dynamic>{'data': 'hello'});
+      expect(decodePusherData('[1,2]'), <String, dynamic>{
+        'data': <int>[1, 2],
+      });
+      expect(decodePusherData(3), <String, dynamic>{'data': 3});
+    });
+  });
+
+  group('PusherFrame.parse', () {
+    test('reads event, channel, data and user_id', () {
+      final frame = PusherFrame.parse('{"event":"client-x","channel":"private-a","data":"{}","user_id":7}');
+      expect(frame.event, 'client-x');
+      expect(frame.channel, 'private-a');
+      expect(frame.userId, '7');
+    });
+
+    test('rejects non-text, non-JSON, non-object and nameless frames', () {
+      for (final Object? raw in <Object?>[42, '{oops', '[1]', '{"data":1}', '{"event":""}']) {
+        expect(() => PusherFrame.parse(raw), throwsA(isA<ReverbFormatException>()), reason: '$raw');
+      }
+    });
+  });
+
+  test('encodePusherFrame omits absent members', () {
+    expect(encodePusherFrame('pusher:ping'), '{"event":"pusher:ping"}');
+    expect(
+      encodePusherFrame('client-a', data: <String, int>{'x': 1}, channel: 'private-b'),
+      '{"event":"client-a","data":{"x":1},"channel":"private-b"}',
+    );
+  });
+
+  test('channel kinds and names', () {
+    expect(ReverbChannelKind.of('private-encrypted-a'), ReverbChannelKind.encrypted);
+    expect(ReverbChannelKind.of('private-users.1'), ReverbChannelKind.private);
+    expect(ReverbChannelKind.of('presence-room'), ReverbChannelKind.presence);
+    expect(ReverbChannelKind.of('feed'), ReverbChannelKind.public);
+    expect(validateChannelName('private-users.1'), isNull);
+    expect(validateChannelName(''), isNotNull);
+    expect(validateChannelName('a b'), isNotNull);
+    expect(validateChannelName('x' * 201), isNotNull);
+  });
+
   group('ReverbOptions', () {
     test('builds the socket URL with the default path, a prefix or a custom path', () {
       const options = ReverbOptions(host: 'ws.example.com', appKey: 'key');
@@ -87,6 +143,16 @@ void main() {
     expect(options.copyWith(closeWhenIdle: false).copyWith(port: 1).closeWhenIdle, isFalse);
     expect(() => options.copyWith(idleTimeout: const Duration(seconds: -1)).validate(), throwsArgumentError);
     expect(() => options.copyWith(reconnectBackoff: const Duration(seconds: -1)).validate(), throwsArgumentError);
+  });
+
+  test('laravelEventName follows Laravel Echo', () {
+    expect(laravelEventName('OrderShipped'), r'App\Events\OrderShipped');
+    expect(laravelEventName('OrderShipped', namespace: r'Domain\Events'), r'Domain\Events\OrderShipped');
+    expect(laravelEventName('OrderShipped', namespace: ''), 'OrderShipped');
+    expect(laravelEventName('.order.shipped'), 'order.shipped');
+    expect(laravelEventName(r'\Domain\Events\OrderShipped'), r'Domain\Events\OrderShipped');
+    expect(laravelEventName('pusher:member_added'), 'pusher:member_added');
+    expect(laravelEventName('client-typing'), 'client-typing');
   });
 
   group('default retry classification', () {

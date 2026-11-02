@@ -13,3 +13,12 @@ export 'src/cancel_token.dart' show ReverbCancelToken;
 export 'src/exceptions.dart';
 export 'src/options.dart'
     show dartReverbChannelsVersion, ReverbHeadersBuilder, ReverbOptions, ReverbRetryPredicate, RetryPolicy;
+export 'src/protocol.dart'
+    show
+        PusherEvents,
+        PusherFrame,
+        ReverbChannelKind,
+        decodePusherData,
+        encodePusherFrame,
+        laravelEventName,
+        validateChannelName;
