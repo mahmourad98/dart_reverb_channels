@@ -40,6 +40,15 @@ abstract final class PusherEvents {
   /// Delivered to subscribers when a presence member leaves.
   static const String memberRemoved = 'pusher:member_removed';
 
+  /// Server → client: how many connections are subscribed to a channel. Sent
+  /// by hosted Pusher when the app enables subscription counting; Laravel
+  /// Reverb does not send it.
+  static const String internalSubscriptionCount = 'pusher_internal:subscription_count';
+
+  /// Delivered to subscribers when the subscription count changes, with
+  /// `{'subscription_count': n}` as its data.
+  static const String subscriptionCount = 'pusher:subscription_count';
+
   /// The prefix of client events (whispers).
   static const String clientEventPrefix = 'client-';
 

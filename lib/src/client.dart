@@ -77,6 +77,7 @@ final class _ChannelEntry {
   String? sharedSecret;
   String? channelData;
   String? myId;
+  int? subscriptionCount;
   final Map<String, PresenceMember> members = <String, PresenceMember>{};
 
   /// Moves the channel to [next] and mirrors it on every owner. The only way
@@ -701,6 +702,7 @@ final class ReverbClient {
       entry.stopAttempt(reason);
       entry.members.clear();
       entry.myId = null;
+      entry.subscriptionCount = null;
       if (entry.status != _EntryStatus.failed) entry.setStatus(_EntryStatus.waiting);
     }
   }
@@ -886,15 +888,30 @@ final class ReverbClient {
         _onMember(name, frame, added: true);
       case PusherEvents.internalMemberRemoved:
         _onMember(name, frame, added: false);
+      case PusherEvents.internalSubscriptionCount:
+        _onSubscriptionCount(name, frame);
       default:
         if (frame.event.startsWith(PusherEvents.internalPrefix)) {
-          // Protocol bookkeeping (for example subscription counts), not an
+          // Protocol bookkeeping this client does not use, not an
           // application event.
           _log(ReverbLogLevel.debug, 'ignored ${frame.event} on $name');
           return;
         }
         _onChannelEvent(name, frame);
     }
+  }
+
+  void _onSubscriptionCount(String name, PusherFrame frame) {
+    final entry = _channels[name];
+    if (entry == null || entry.status != _EntryStatus.subscribed) return;
+    final data = frame.decodedData;
+    final count = readPusherInt(data['subscription_count']);
+    if (count == null) return;
+    entry.subscriptionCount = count;
+    _deliver(
+      entry,
+      ReverbEvent(channel: name, name: PusherEvents.subscriptionCount, data: data, rawData: frame.data),
+    );
   }
 
   /// Delivers [event] to [entry]'s owners and to [events].

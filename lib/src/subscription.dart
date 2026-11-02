@@ -85,6 +85,16 @@ final class ReverbSubscription {
     return Map<String, PresenceMember>.unmodifiable(entry.members);
   }
 
+  /// How many connections are subscribed to the channel, as the server last
+  /// reported it with `pusher:subscription_count`; null until it does, and
+  /// again after a drop. Hosted Pusher sends it when the app enables
+  /// subscription counting; Laravel Reverb does not send it.
+  int? get subscriptionCount {
+    final entry = _entry;
+    if (entry == null || _cancelled) return null;
+    return entry.subscriptionCount;
+  }
+
   /// This client's own member on a presence channel, once subscribed.
   PresenceMember? get me {
     final entry = _entry;

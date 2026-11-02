@@ -173,14 +173,14 @@ void main() {
       });
     });
 
-    test('pusher_internal bookkeeping frames are not delivered as events', () {
+    test('pusher_internal frames the client does not use are not delivered as events', () {
       fakeAsync((FakeAsync async) {
         final rig = ClientRig();
         final probe = Probe(rig.client.subscribe(_users));
         async.flushMicrotasks();
 
         rig.connector.socket
-          ..event(_users, 'pusher_internal:subscription_count', <String, Object?>{'subscription_count': 2})
+          ..event(_users, 'pusher_internal:future_bookkeeping', <String, Object?>{'value': 2})
           ..event(_users, 'order.shipped', <String, Object?>{'order_id': 1});
         async.flushMicrotasks();
 

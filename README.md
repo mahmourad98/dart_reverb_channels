@@ -777,6 +777,7 @@ request's cancellation token, expose the socket's close code/reason, and close a
 | `subscription.error` | The failure behind `failed`; `null` in any other status. |
 | `subscription.events` / `on(name)` | All delivered events / exact-name filter, both broadcast streams. |
 | `subscription.members` / `me` | Presence roster / own member; empty or `null` when unavailable. |
+| `subscription.subscriptionCount` | Connections on the channel as last reported by `pusher:subscription_count` (also delivered as that event); `null` until reported. Hosted Pusher sends it when enabled; Reverb does not. |
 | `subscription.trigger(name, data)` | Attempt a client event on a private/presence channel. |
 | `subscription.cancel()` / `isCancelled` | Release this handle / whether it has ended. |
 

@@ -252,4 +252,51 @@ void main() {
       }
     });
   });
+
+  group('subscription count', () {
+    test('is read from pusher_internal:subscription_count and delivered as pusher:subscription_count', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final probe = Probe(rig.client.subscribe(_news));
+        final tapped = <ReverbEvent>[];
+        rig.client.events.listen(tapped.add);
+        async.flushMicrotasks();
+        expect(probe.subscription.subscriptionCount, isNull);
+
+        rig.connector.socket.event(_news, PusherEvents.internalSubscriptionCount, <String, Object?>{
+          'subscription_count': 3,
+        });
+        async.flushMicrotasks();
+
+        expect(probe.subscription.subscriptionCount, 3);
+        expect(probe.events.single.name, PusherEvents.subscriptionCount);
+        expect(probe.events.single.data['subscription_count'], 3);
+        expect(tapped.single.name, PusherEvents.subscriptionCount);
+      });
+    });
+
+    test('is ignored before the channel is subscribed and forgotten on a drop', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(autoAcknowledge: false);
+        final subscription = rig.client.subscribe(_news);
+        async.flushMicrotasks();
+
+        rig.connector.socket.event(_news, PusherEvents.internalSubscriptionCount, <String, Object?>{
+          'subscription_count': 9,
+        });
+        async.flushMicrotasks();
+        expect(subscription.subscriptionCount, isNull, reason: 'not subscribed yet');
+
+        rig.connector.socket
+          ..acknowledge(_news)
+          ..event(_news, PusherEvents.internalSubscriptionCount, <String, Object?>{'subscription_count': 4});
+        async.flushMicrotasks();
+        expect(subscription.subscriptionCount, 4);
+
+        rig.connector.socket.serverClose(1006);
+        async.flushMicrotasks();
+        expect(subscription.subscriptionCount, isNull);
+      });
+    });
+  });
 }
