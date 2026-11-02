@@ -161,14 +161,16 @@ enum ReverbConnectionState {
   /// A socket is established.
   connected,
 
-  /// A cycle is running after an established socket dropped.
+  /// A cycle is running after an established socket dropped, or after
+  /// `ReverbClient.reconnect`.
   reconnecting,
 
-  /// The last cycle ran out of attempts. The next subscribe starts a new one.
+  /// The last cycle ran out of attempts. The next subscribe, or
+  /// `ReverbClient.reconnect`, starts a new one.
   unavailable,
 
   /// The server refused the connection with a fatal (4000–4099) code. The next
-  /// subscribe starts a new cycle.
+  /// subscribe, or `ReverbClient.reconnect`, starts a new cycle.
   failed,
 
   /// Closed by `ReverbClient.pause`, usually because the app went to the
@@ -192,14 +194,15 @@ enum ReverbSubscriptionStatus {
   subscribed,
 
   /// It was subscribed, and the channel is being subscribed again because the
-  /// socket dropped or the client was paused.
+  /// socket dropped, `ReverbClient.reconnect` ran or the client was paused.
   /// Nothing is delivered until it is [subscribed] again.
   resubscribing,
 
   /// Not subscribed, and no attempt is running: the attempts ran out or a
   /// failure was fatal (`ReverbSubscription.error` holds it). Not final: the
-  /// subscription recovers when its channel is subscribed again, after a new
-  /// connection cycle or a new subscriber of the same channel.
+  /// subscription recovers when its channel is subscribed again, after
+  /// `ReverbClient.reconnect`, a new connection cycle or a new subscriber of
+  /// the same channel.
   failed,
 
   /// Ended by `ReverbSubscription.cancel` or `ReverbClient.closeAll`. Final.

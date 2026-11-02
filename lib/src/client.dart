@@ -128,10 +128,10 @@ final class _ChannelEntry {
 ///   entry it started for, so [closeAll], a cancel, or a new socket strands
 ///   it.
 /// - **Reconnect and resubscribe.** After an established socket drops, a new
-///   cycle runs and every live channel resubscribes with fresh authorization.
-///   Events published while disconnected are not replayed: each
-///   subscription's [ReverbSubscription.statusChanges] shows when its channel
-///   came back.
+///   cycle runs and every live channel resubscribes with fresh authorization;
+///   [reconnect] does the same on demand, failed channels included. Events
+///   published while disconnected are not replayed: each subscription's
+///   [ReverbSubscription.statusChanges] shows when its channel came back.
 /// - **Pluggable edges.** The transport ([ReverbConnector]), authorization
 ///   ([ChannelAuthorizer]), decryption ([ReverbChannelDecrypter]), error
 ///   reporting and logging are all injected.
@@ -191,6 +191,9 @@ final class ReverbClient {
   Timer? _connectDeadline;
   ReverbCancelToken? _connectToken;
   Timer? _idleTimer;
+
+  /// Callers of [reconnect] waiting for the running cycle's outcome.
+  final List<Completer<void>> _connectWaiters = <Completer<void>>[];
 
   /// The connection state.
   ReverbConnectionState get state => _state;
@@ -263,6 +266,7 @@ final class ReverbClient {
       }
       entry.subscriptions.clear();
     }
+    _settleConnectWaiters(const ReverbCancelledException('Client closed'));
     if (!_paused) _setState(ReverbConnectionState.disconnected);
   }
 
@@ -273,6 +277,7 @@ final class ReverbClient {
     if (_disposed || _paused) return;
     _paused = true;
     _closeSocket(const ReverbCancelledException('Client paused'));
+    _settleConnectWaiters(const ReverbCancelledException('Client paused'));
     _setState(ReverbConnectionState.paused);
   }
 
@@ -285,6 +290,38 @@ final class ReverbClient {
     } else {
       _startCycle(firstDelay: Duration.zero, reconnecting: true);
     }
+  }
+
+  /// Drops the socket and connects again at once, with a fresh set of
+  /// [ReverbOptions.connectRetry] attempts. Every live channel resubscribes
+  /// with fresh authorization, failed ones included: this is how
+  /// subscriptions recover after [ReverbConnectionState.unavailable] or
+  /// [ReverbConnectionState.failed] without subscribing again. Call it when
+  /// connectivity returns, or from a retry button.
+  ///
+  /// Completes once a socket is established, or with the [ReverbException]
+  /// that ended the new cycle ([ReverbCancelledException] when [closeAll],
+  /// [pause] or the release of the last channel came first). Awaiting it is
+  /// optional: an unawaited failure is not reported as uncaught.
+  ///
+  /// With no live channel and no open socket there is nothing to reconnect,
+  /// and it completes at once. While paused it fails with
+  /// [ReverbCancelledException] ([resume] reconnects); after [dispose], with
+  /// [ReverbConfigurationException].
+  Future<void> reconnect() {
+    if (_disposed) {
+      return _failedFuture(const ReverbConfigurationException('Client is disposed; cannot reconnect'));
+    }
+    if (_paused) {
+      return _failedFuture(const ReverbCancelledException('Client is paused; resume() reconnects'));
+    }
+    if (_channels.isEmpty && _session == null && !_cycleRunning) return Future<void>.value();
+
+    final connected = _waitForConnection();
+    _log(ReverbLogLevel.info, 'reconnecting on request');
+    _closeSocket(const ReverbCancelledException('Reconnecting'));
+    _startCycle(firstDelay: Duration.zero, reconnecting: true);
+    return connected;
   }
 
   /// [closeAll], then releases the state stream. The client is unusable after.
@@ -366,6 +403,7 @@ final class ReverbClient {
     // A socket that is still connecting has nothing left to serve: abandon it.
     if (!_established || (options.closeWhenIdle && options.idleTimeout == Duration.zero)) {
       _closeSocket(const ReverbCancelledException('No channels left'));
+      _settleConnectWaiters(const ReverbCancelledException('No channels left'));
       return;
     }
     if (!options.closeWhenIdle) return;
@@ -506,6 +544,7 @@ final class ReverbClient {
     _connectDeadline = null;
     _clearStaleAcks();
     _setState(ReverbConnectionState.connected);
+    _settleConnectWaiters();
 
     unawaited(session.dropped.then((ReverbException cause) => _onDropped(session, cause)));
 
@@ -552,7 +591,7 @@ final class ReverbClient {
   /// The cycle ran out or hit a fatal failure: pending `ready` futures fail,
   /// every subscription becomes [ReverbSubscriptionStatus.failed], the socket
   /// stays idle and live subscriptions stay open and silent. The next
-  /// [subscribe] starts a new cycle.
+  /// [subscribe], or [reconnect], starts a new cycle.
   void _onCycleExhausted(ReverbException failure, StackTrace? stackTrace) {
     _cycleRunning = false;
     _cycleTimer?.cancel();
@@ -564,6 +603,7 @@ final class ReverbClient {
       entry.setStatus(_EntryStatus.failed, failure);
       entry.fail(failure, stackTrace);
     }
+    _settleConnectWaiters(failure, stackTrace);
   }
 
   /// Stops every connection-level task, closes the socket and advances the
@@ -607,6 +647,32 @@ final class ReverbClient {
     if (error is ReverbException) return error;
     return ReverbConnectionException('Connection attempt failed: $error', cause: error, stackTrace: stackTrace);
   }
+
+  /// A future for the running cycle's outcome, settled by
+  /// [_settleConnectWaiters]. A replaced cycle hands its waiters to the next.
+  Future<void> _waitForConnection() {
+    final waiter = Completer<void>();
+    // Optional reading, like `ready`: an unawaited failure is not uncaught.
+    waiter.future.ignore();
+    _connectWaiters.add(waiter);
+    return waiter.future;
+  }
+
+  /// Completes every waiter: with nothing on success, with [failure] otherwise.
+  void _settleConnectWaiters([ReverbException? failure, StackTrace? stackTrace]) {
+    if (_connectWaiters.isEmpty) return;
+    final waiters = List<Completer<void>>.of(_connectWaiters);
+    _connectWaiters.clear();
+    for (final waiter in waiters) {
+      if (failure == null) {
+        waiter.complete();
+      } else {
+        waiter.completeError(failure, stackTrace);
+      }
+    }
+  }
+
+  static Future<void> _failedFuture(ReverbException error) => Future<void>.error(error)..ignore();
 
   // ---------------------------------------------------------------------------
   // Channel attempts

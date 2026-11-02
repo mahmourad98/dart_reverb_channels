@@ -91,3 +91,23 @@ final class StatusLog {
 
   Future<void> dispose() => _listener.cancel();
 }
+
+/// Observes a future's outcome without awaiting it.
+final class Outcome {
+  Outcome(Future<void> future) {
+    future.then<void>(
+      (_) {
+        done = true;
+      },
+      onError: (Object failure) {
+        done = true;
+        error = failure;
+      },
+    );
+  }
+
+  bool done = false;
+  Object? error;
+
+  bool get succeeded => done && error == null;
+}

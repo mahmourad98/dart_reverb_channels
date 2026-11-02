@@ -104,6 +104,26 @@ void main() {
       });
     });
 
+    test('a subscription that never succeeded goes failed, pending, subscribed when retried', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig()..connector.failNext(StateError('offline'), times: 3);
+        final probe = Probe(rig.client.subscribe(_news));
+        final log = StatusLog(probe.subscription);
+        async.elapse(const Duration(seconds: 10));
+        expect(probe.readyError, isA<ReverbConnectionException>());
+
+        unawaited(rig.client.reconnect());
+        async.flushMicrotasks();
+
+        expect(log.changes, <ReverbSubscriptionStatus>[
+          ReverbSubscriptionStatus.failed,
+          ReverbSubscriptionStatus.pending,
+          ReverbSubscriptionStatus.subscribed,
+        ]);
+        expect(probe.readyError, isA<ReverbConnectionException>(), reason: 'ready keeps its first outcome');
+      });
+    });
+
     test('an owner joining during a resubscribe is pending while the earlier owner resubscribes', () {
       fakeAsync((FakeAsync async) {
         final rig = ClientRig();
@@ -189,6 +209,188 @@ void main() {
         expect(log.changes, <ReverbSubscriptionStatus>[ReverbSubscriptionStatus.cancelled]);
         expect(rig.connector.requests, isEmpty);
       });
+    });
+  });
+
+  group('reconnect()', () {
+    test('after the attempts run out it retries at once and failed subscriptions recover', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final probe = Probe(rig.client.subscribe(_news));
+        async.flushMicrotasks();
+        rig.connector.failNext(StateError('offline'), times: 3);
+        rig.connector.socket.serverClose();
+        async.elapse(const Duration(minutes: 10));
+        expect(rig.client.state, ReverbConnectionState.unavailable);
+        expect(rig.connector.requests, hasLength(4), reason: 'nothing retries on its own');
+
+        final outcome = Outcome(rig.client.reconnect());
+        async.flushMicrotasks();
+
+        expect(outcome.succeeded, isTrue);
+        expect(rig.client.state, ReverbConnectionState.connected);
+        expect(rig.connector.requests, hasLength(5));
+        expect(probe.subscription.status, ReverbSubscriptionStatus.subscribed);
+        rig.connector.socket.event(_news, 'headline', <String, Object?>{'id': 1});
+        async.flushMicrotasks();
+        expect(probe.events, hasLength(1));
+      });
+    });
+
+    test('on a connected client it replaces the socket and resubscribes with fresh authorization', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final subscription = rig.client.subscribe(_users);
+        final log = StatusLog(subscription);
+        async.flushMicrotasks();
+        final old = rig.connector.socket;
+
+        final outcome = Outcome(rig.client.reconnect());
+        async.flushMicrotasks();
+
+        expect(outcome.succeeded, isTrue);
+        expect(old.closedByClient, isTrue);
+        expect(rig.connector.sockets, hasLength(2));
+        expect(rig.authorizer.requests.map((ChannelAuthorizationRequest r) => r.socketId), <String>['1.1', '2.2']);
+        expect(rig.subscribes(rig.connector.socket, _users), hasLength(1));
+        expect(log.changes, <ReverbSubscriptionStatus>[
+          ReverbSubscriptionStatus.subscribed,
+          ReverbSubscriptionStatus.resubscribing,
+          ReverbSubscriptionStatus.subscribed,
+        ]);
+        expect(rig.reports, isEmpty, reason: 'closing the old socket on purpose is not a failure');
+      });
+    });
+
+    test('during a back-off it retries at once with a fresh set of attempts', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig()..connector.failNext(StateError('offline'), times: 2);
+        final probe = Probe(rig.client.subscribe(_news));
+        async.elapse(const Duration(seconds: 1));
+        expect(rig.connector.requests, hasLength(2), reason: 'two of three attempts used, waiting 2 s');
+
+        rig.connector.failNext(StateError('offline'), times: 2);
+        final outcome = Outcome(rig.client.reconnect());
+        async.flushMicrotasks();
+        expect(rig.connector.requests, hasLength(3), reason: 'no wait for the back-off');
+        async.elapse(const Duration(seconds: 3));
+
+        expect(rig.connector.requests, hasLength(5), reason: 'the new cycle got three attempts again');
+        expect(outcome.succeeded, isTrue);
+        expect(probe.succeeded, isTrue);
+      });
+    });
+
+    test('its future fails with the error that ended the new cycle', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig()..connector.failNext(StateError('offline'), times: 6);
+        final probe = Probe(rig.client.subscribe(_news));
+        async.elapse(const Duration(seconds: 10));
+
+        final outcome = Outcome(rig.client.reconnect());
+        async.elapse(const Duration(seconds: 10));
+
+        expect(outcome.error, isA<ReverbConnectionException>());
+        expect(rig.client.state, ReverbConnectionState.unavailable);
+        expect(probe.subscription.status, ReverbSubscriptionStatus.failed);
+      });
+    });
+
+    test('closeAll, pause or the release of the last channel cancel a pending reconnect', () {
+      fakeAsync((FakeAsync async) {
+        for (final stop in <String>['closeAll', 'pause', 'cancel']) {
+          final rig = ClientRig();
+          final subscription = rig.client.subscribe(_news);
+          async.flushMicrotasks();
+          rig.connector.hold = true;
+
+          final outcome = Outcome(rig.client.reconnect());
+          async.flushMicrotasks();
+          expect(rig.connector.pendingCount, 1);
+          switch (stop) {
+            case 'closeAll':
+              unawaited(rig.client.closeAll());
+            case 'pause':
+              rig.client.pause();
+            case 'cancel':
+              unawaited(subscription.cancel());
+          }
+          async.flushMicrotasks();
+
+          expect(outcome.error, isA<ReverbCancelledException>(), reason: stop);
+          expect(rig.connector.pendingCount, 0, reason: '$stop aborts the pending upgrade');
+        }
+      });
+    });
+
+    test('while paused or after dispose it changes nothing and fails', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        rig.client.subscribe(_news);
+        async.flushMicrotasks();
+
+        rig.client.pause();
+        final paused = Outcome(rig.client.reconnect());
+        async.flushMicrotasks();
+        expect(paused.error, isA<ReverbCancelledException>());
+        expect(rig.client.state, ReverbConnectionState.paused);
+        expect(rig.connector.requests, hasLength(1));
+
+        unawaited(rig.client.dispose());
+        async.flushMicrotasks();
+        final disposed = Outcome(rig.client.reconnect());
+        async.flushMicrotasks();
+        expect(disposed.error, isA<ReverbConfigurationException>());
+        expect(rig.connector.requests, hasLength(1));
+      });
+    });
+
+    test('with nothing to reconnect it completes at once without opening a socket', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        final outcome = Outcome(rig.client.reconnect());
+        async.flushMicrotasks();
+        expect(outcome.succeeded, isTrue);
+        expect(rig.connector.requests, isEmpty);
+      });
+    });
+
+    test('two calls share the outcome and leave one socket', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        rig.client.subscribe(_news);
+        async.flushMicrotasks();
+        rig.connector.hold = true;
+
+        final first = Outcome(rig.client.reconnect());
+        async.flushMicrotasks();
+        final second = Outcome(rig.client.reconnect());
+        async.flushMicrotasks();
+        expect(rig.connector.pendingCount, 1, reason: 'the first attempt was abandoned');
+        rig.connector.completePending();
+        async.flushMicrotasks();
+
+        expect(first.succeeded, isTrue);
+        expect(second.succeeded, isTrue);
+        expect(rig.connector.openSockets, hasLength(1));
+      });
+    });
+
+    test('an unawaited reconnect that fails is not an uncaught error', () {
+      final uncaught = <Object>[];
+      runZonedGuarded(() {
+        fakeAsync((FakeAsync async) {
+          final rig = ClientRig()..connector.failNext(StateError('offline'), times: 6);
+          rig.client.subscribe(_news);
+          async.elapse(const Duration(seconds: 10));
+          unawaited(rig.client.reconnect());
+          async.elapse(const Duration(seconds: 10));
+          rig.client.pause();
+          unawaited(rig.client.reconnect());
+          async.flushMicrotasks();
+        });
+      }, (Object error, StackTrace stackTrace) => uncaught.add(error));
+      expect(uncaught, isEmpty);
     });
   });
 }
