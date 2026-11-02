@@ -1,3 +1,19 @@
+## 1.2.0
+
+- `ReverbClient.connect()`: opens the socket before the first subscription and keeps it open with
+  no channel until a subscription takes it over (or `closeAll`); completes once connected.
+- `ReverbClient.errors` and `ReverbClient.events`: broadcast streams of every handled failure (the
+  reports `onError` receives) and of every event delivered to a subscription, for any number of
+  listeners.
+- `HttpChannelAuthorizer(responseParser: …)`: reads authorization responses that are not the raw
+  `{auth}` body, such as one wrapped in an API envelope.
+- `ReverbOptions.pusherCluster(cluster:, appKey:)`: options for a hosted Pusher Channels app
+  (`ws-{cluster}.pusher.com`, TLS on port 443).
+- Subscription counts: `pusher_internal:subscription_count` updates
+  `ReverbSubscription.subscriptionCount` and is delivered as `pusher:subscription_count`. Hosted
+  Pusher sends it when the app enables it; Laravel Reverb does not.
+- `ReverbClient.isDisposed`.
+
 ## 1.1.0
 
 - `ReverbSubscription.status`, `statusChanges` and `error`: a subscription now reports what happens

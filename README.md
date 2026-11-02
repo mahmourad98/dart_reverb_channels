@@ -4,7 +4,7 @@ A [Laravel Reverb](https://reverb.laravel.com) client for Flutter, written in pu
 Pusher protocol (version 7). Its transport and authorization can be adapted to other
 Pusher-compatible servers.
 
-This guide describes version **1.1.0**, the current [`main` branch](https://github.com/mahmourad98/dart_reverb_channels/tree/main).
+This guide describes version **1.2.0**, the current [`main` branch](https://github.com/mahmourad98/dart_reverb_channels/tree/main).
 
 - **One shared socket.** Every screen that listens to a channel gets its own handle; the channel
   is left when the last handle is cancelled, and the socket closes when the last channel goes.
@@ -698,7 +698,7 @@ The constructor validates options and can throw `ArgumentError` before any subsc
 | `socketPath` | none | Replaces the whole socket path; include any required app key yourself. |
 | `protocolVersion` | `7` | `protocol` query parameter. |
 | `clientName` | `dart_reverb_channels` | `client` query parameter. |
-| `clientVersion` | `1.1.0` | `version` query parameter; exported as `dartReverbChannelsVersion`. |
+| `clientVersion` | `1.2.0` | `version` query parameter; exported as `dartReverbChannelsVersion`. |
 | `queryParameters` | `{}` | Extra URL parameters; duplicate keys override `protocol`, `client` or `version`. |
 | `headers` | `{}` | Headers for the WebSocket upgrade, such as `Origin`. |
 | `headersBuilder` | none | Headers built per connection attempt, merged over `headers`. |
@@ -715,7 +715,7 @@ The constructor validates options and can throw `ArgumentError` before any subsc
 | `idleTimeout` | 0 s | With `closeWhenIdle`, how long an idle socket stays open first. |
 
 `options.socketUri` shows the resulting URL, normally
-`wss://ws.example.com:443/app/your-reverb-app-key?protocol=7&client=dart_reverb_channels&version=1.1.0`.
+`wss://ws.example.com:443/app/your-reverb-app-key?protocol=7&client=dart_reverb_channels&version=1.2.0`.
 Use `pathPrefix: '/ws'` for `/ws/app/{key}`; `socketPath` replaces that entire path.
 
 For an app on hosted Pusher Channels, `ReverbOptions.pusherCluster(cluster: 'eu', appKey: '…')`
