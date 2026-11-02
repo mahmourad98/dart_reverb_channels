@@ -4,7 +4,7 @@ A [Laravel Reverb](https://reverb.laravel.com) client for Flutter, written in pu
 Pusher protocol (version 7). Its transport and authorization can be adapted to other
 Pusher-compatible servers.
 
-This guide describes version **1.0.0**, matching [the `v1.0.0` tag](https://github.com/mahmourad98/dart_reverb_channels/tree/v1.0.0).
+This guide describes version **1.0.0**, the current [`main` branch](https://github.com/mahmourad98/dart_reverb_channels/tree/main).
 
 - **One shared socket.** Every screen that listens to a channel gets its own handle; the channel
   is left when the last handle is cancelled, and the socket closes when the last channel goes.
@@ -49,15 +49,13 @@ This guide describes version **1.0.0**, matching [the `v1.0.0` tag](https://gith
 
 ## Installation
 
-Add the GitHub dependency to your app's `pubspec.yaml`. This pins the 1.0.0 release tag; update
-`ref` deliberately when upgrading:
+Add the GitHub dependency to your app's `pubspec.yaml`. It follows the `main` branch; your
+`pubspec.lock` records the exact commit your app builds against:
 
 ```yaml
 dependencies:
   dart_reverb_channels:
-    git:
-      url: https://github.com/mahmourad98/dart_reverb_channels.git
-      ref: v1.0.0
+    git: https://github.com/mahmourad98/dart_reverb_channels.git
 ```
 
 Then fetch it:
@@ -65,6 +63,14 @@ Then fetch it:
 ```bash
 flutter pub get
 ```
+
+To move to the latest `main` later:
+
+```bash
+flutter pub upgrade dart_reverb_channels
+```
+
+To stay on one commit instead, use the `git:` map form with `url:` and `ref: <commit sha>`.
 
 The package has four entry points:
 
