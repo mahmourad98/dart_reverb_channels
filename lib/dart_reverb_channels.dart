@@ -10,6 +10,16 @@
 library;
 
 export 'src/cancel_token.dart' show ReverbCancelToken;
+export 'src/event.dart'
+    show
+        PresenceMember,
+        ReverbChannelDecrypter,
+        ReverbConnectionState,
+        ReverbErrorReport,
+        ReverbErrorStage,
+        ReverbEvent,
+        ReverbLogLevel,
+        ReverbLogRecord;
 export 'src/exceptions.dart';
 export 'src/options.dart'
     show dartReverbChannelsVersion, ReverbHeadersBuilder, ReverbOptions, ReverbRetryPredicate, RetryPolicy;
