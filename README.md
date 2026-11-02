@@ -31,6 +31,8 @@ This guide describes version **1.0.0**, matching [the `v1.0.0` tag](https://gith
 9. [How it behaves](#how-it-behaves)
 10. [Errors](#errors)
 11. [Testing your code](#testing-your-code)
+12. [Platform notes](#platform-notes)
+13. [Troubleshooting](#troubleshooting)
 
 ## Requirements
 
@@ -782,3 +784,105 @@ void main() {
 every request; `FakeReverbSocket` can send `refuse`, `protocolError` and `serverClose`, and records
 what the client sent (`sentNamed`). `FakeChannelAuthorizer` can hold, fail or script
 authorizations.
+
+## Platform notes
+
+### Android, iOS and desktop
+
+Use `IOWebSocketConnector`. It sends upgrade headers and can abort pending upgrades. As described
+in [Flutter's networking setup](https://docs.flutter.dev/data-and-backend/networking):
+
+- Android: declare `<uses-permission android:name="android.permission.INTERNET" />` inside the
+  `<manifest>` in `android/app/src/main/AndroidManifest.xml`, including release builds.
+- macOS: add `<key>com.apple.security.network.client</key><true/>` inside the entitlement
+  dictionaries in both `macos/Runner/DebugProfile.entitlements` and
+  `macos/Runner/Release.entitlements`.
+- Use trusted HTTPS/WSS endpoints in production. If local HTTP is blocked, configure a
+  development-only exception under your platform's network policy:
+  [Android](https://developer.android.com/training/articles/security-config#CleartextTrafficPermitted)
+  / [Apple](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity).
+
+### Flutter web
+
+Import the core and use the default connector; do not import `io.dart` into a web entry point:
+
+```dart
+import 'package:dart_reverb_channels/dart_reverb_channels.dart';
+
+final reverb = ReverbClient(
+  options: const ReverbOptions(host: 'ws.example.com', appKey: 'your-reverb-app-key'),
+);
+```
+
+Browsers cannot send custom WebSocket upgrade headers; the default connector ignores `headers`
+and sends the browser's own origin. Allow that origin in Reverb's `allowed_origins`. For
+cross-origin HTTP authorization, configure CORS on your API for the auth endpoint, including
+`Authorization` / `Content-Type` headers. An HTTPS app needs a secure `wss` endpoint.
+
+For cookie-based authentication, supply a browser HTTP client with the appropriate credential
+behavior and handle your backend's CSRF flow. The default authorizer does not bootstrap a Sanctum
+session or manage CSRF tokens for you.
+
+### Custom certificates
+
+Socket TLS trust and authorization HTTP TLS trust are separate. On native platforms, configure
+both factories with your `SecurityContext`:
+
+```dart
+import 'dart:io';
+
+import 'package:dart_reverb_channels/io.dart';
+import 'package:http/io_client.dart';
+
+ReverbClient createTrustedClient(SecurityContext context, Uri authEndpoint) {
+  return ReverbClient(
+    options: const ReverbOptions(host: 'ws.example.com', appKey: 'your-reverb-app-key'),
+    connector: IOWebSocketConnector(
+      httpClientFactory: () => HttpClient(context: context),
+    ),
+    authorizer: HttpChannelAuthorizer(
+      endpoint: authEndpoint,
+      clientFactory: () => IOClient(HttpClient(context: context)),
+      // Add your authorization headers here for authenticated channels.
+    ),
+  );
+}
+```
+
+If importing `package:http` in your app, declare `http` as a direct dependency
+(`flutter pub add http`). Supply your app's token headers in addition to the certificate trust.
+
+### Local development
+
+A default `php artisan reverb:start` accepts unencrypted connections on port 8080. For a direct
+connection, use `useTls: false, port: 8080`:
+
+| App target | Host to reach a server on your development machine |
+|---|---|
+| Android emulator | `10.0.2.2` |
+| iOS simulator / desktop on the same machine | `localhost` |
+| Physical phone | Your machine's reachable LAN IP or development DNS name |
+| Flutter web | A browser-reachable host, with origin/CORS and TLS configured as above |
+
+The authorization endpoint must also use an address reachable from the device. Reverb's listening
+address `0.0.0.0` is not a client destination.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `ReverbProtocolException` 4001 | Wrong `appKey`. |
+| `ReverbProtocolException` 4009 before connecting | The server refused the connection, usually `Origin` not in Reverb's `allowed_origins`. Set `headers: {'Origin': …}`. |
+| `ready` fails with `ReverbTimeoutException` for a private channel | Reverb answers a bad signature with `pusher:error` 4009 without a channel, so it surfaces as a timeout. Check that the auth endpoint and Reverb share the same app key and secret. |
+| `ReverbAuthorizationException` 401/403 | The auth endpoint did not accept the token, or `routes/channels.php` returned false. |
+| Subscribed, but no events | The broadcast queue worker is not running, the event name does not match (see [Event names](#event-names)), or the event goes to another channel. |
+| `pinging` lines on a quiet channel | Normal keep-alive after the shorter of the server's `activity_timeout` and your `activityTimeout`. |
+| `HandshakeException` / `CertificateException` | TLS trust: the device does not trust the server certificate, or your custom `SecurityContext` lacks it. |
+| Authorization 200 followed by `malformedResponse` | Return the raw `auth` object, not an HTML login page or a wrapped API response. Encrypted channels also need `shared_secret`. |
+| Authorization 404/419, or browser CORS error | Check the exact route/prefix, middleware, CSRF/credential strategy and API CORS policy. |
+| `unavailable` / `failed` persists | Automatic attempts ended or the server refused the connection. Fix the cause, cancel the old handle and subscribe again. |
+| A release build cannot connect | Check Android internet permission, macOS release entitlements, device-reachable hosts, proxy upgrades and trusted TLS. |
+
+Use `php artisan reverb:start --debug` to inspect traffic and `php artisan route:list --path=broadcasting`
+to verify the auth route. After server configuration changes, refresh cached Laravel configuration
+as appropriate and restart the Reverb process.
