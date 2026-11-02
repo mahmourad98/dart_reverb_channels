@@ -33,6 +33,9 @@ This guide describes version **1.0.0**, matching [the `v1.0.0` tag](https://gith
 11. [Testing your code](#testing-your-code)
 12. [Platform notes](#platform-notes)
 13. [Troubleshooting](#troubleshooting)
+14. [Running the example](#running-the-example)
+15. [Developing this package](#developing-this-package)
+16. [Credits and license](#credits-and-license)
 
 ## Requirements
 
@@ -886,3 +889,50 @@ address `0.0.0.0` is not a client destination.
 Use `php artisan reverb:start --debug` to inspect traffic and `php artisan route:list --path=broadcasting`
 to verify the auth route. After server configuration changes, refresh cached Laravel configuration
 as appropriate and restart the Reverb process.
+
+## Running the example
+
+[example/main.dart](example/main.dart) is a Flutter entry point, not a standalone app with platform
+runners. Create a Flutter app, add the dependency from [Installation](#installation), and copy that
+file into the app's `lib/main.dart`:
+
+```bash
+flutter create reverb_demo
+cd reverb_demo
+# Add the dependency and copy example/main.dart into lib/main.dart.
+flutter pub get
+flutter run \
+  --dart-define=REVERB_HOST=ws.example.com \
+  --dart-define=REVERB_APP_KEY=your-reverb-app-key \
+  --dart-define=REVERB_CHANNEL=news
+```
+
+The example lists all channel events and reports initial readiness. It reads only those three
+defines and uses TLS on port 443. For local port 8080, edit its `ReverbOptions` to set
+`useTls: false, port: 8080`. It uses the native connector; for web, remove the `io.dart` import and the connector
+argument. Add an authorizer before using a private or presence channel.
+
+## Developing this package
+
+From a checkout, run the same checks as [CI](.github/workflows/ci.yml):
+
+```bash
+flutter pub get
+dart format --output=none --set-exit-if-changed lib test example
+flutter analyze
+flutter test
+```
+
+CI resolves both `flutter pub upgrade` and `flutter pub downgrade` to check the declared dependency
+ranges. The tests include fake-socket behavior, local WebSocket transport tests, HTTP authorization,
+and [the README's test example](test/readme_example_test.dart). They do not require a running Laravel
+server; verify your own backend, permissions and deployment with an integration smoke test.
+
+## Credits and license
+
+The design draws on [laravel_reverb](https://pub.dev/packages/laravel_reverb) (reference-counted
+channels, lifecycle handling) and [pusher_reverb_flutter](https://pub.dev/packages/pusher_reverb_flutter)
+(custom transports and paths, encrypted channels), and follows the
+[Pusher channels protocol](https://pusher.com/docs/channels/library_auth_reference/pusher-websockets-protocol/).
+
+Released under the [MIT License](LICENSE).
