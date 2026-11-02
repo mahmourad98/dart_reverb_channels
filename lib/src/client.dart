@@ -192,7 +192,12 @@ final class ReverbClient {
   ReverbCancelToken? _connectToken;
   Timer? _idleTimer;
 
-  /// Callers of [reconnect] waiting for the running cycle's outcome.
+  /// Set by [connect]: keeps the socket open with no channel until a
+  /// subscription takes it over.
+  bool _held = false;
+
+  /// Callers of [connect] and [reconnect] waiting for the running cycle's
+  /// outcome.
   final List<Completer<void>> _connectWaiters = <Completer<void>>[];
 
   /// The connection state.
@@ -222,6 +227,8 @@ final class ReverbClient {
 
     _idleTimer?.cancel();
     _idleTimer = null;
+    // A subscription owns the socket from now on; connect()'s hold ends.
+    _held = false;
 
     final subscription = ReverbSubscription._(channel, this);
     final existing = _channels[channel];
@@ -252,11 +259,13 @@ final class ReverbClient {
 
   /// Ends every subscription and closes the socket. Pending `ready` futures
   /// fail with [ReverbCancelledException]; every event stream ends; a pending
-  /// upgrade, authorization or back-off is abandoned. The client stays usable:
-  /// the next [subscribe] starts over. Call it on logout.
+  /// upgrade, authorization or back-off is abandoned, and a [connect] hold
+  /// ends. The client stays usable: the next [subscribe] starts over. Call it
+  /// on logout.
   Future<void> closeAll() async {
     final entries = _channels.values.toList();
     _channels.clear();
+    _held = false;
     _closeSocket(const ReverbCancelledException('Client closed'));
     for (final entry in entries) {
       entry.stopAttempt(const ReverbCancelledException('Client closed'));
@@ -281,15 +290,47 @@ final class ReverbClient {
     _setState(ReverbConnectionState.paused);
   }
 
-  /// Reconnects after [pause] when channels are live.
+  /// Reconnects after [pause] when channels are live, or a [connect] hold is.
   void resume() {
     if (_disposed || !_paused) return;
     _paused = false;
-    if (_channels.isEmpty) {
+    if (_channels.isEmpty && !_held) {
       _setState(ReverbConnectionState.disconnected);
     } else {
       _startCycle(firstDelay: Duration.zero, reconnecting: true);
     }
+  }
+
+  /// Opens the socket before the first [subscribe], so that subscription
+  /// only waits for its authorization and the server's acknowledgement.
+  ///
+  /// The socket stays open with no channel until a subscription takes it
+  /// over (from then on [ReverbOptions.closeWhenIdle] applies as usual), or
+  /// until [closeAll] or [dispose]. A drop reconnects it, and [pause] /
+  /// [resume] keep the hold.
+  ///
+  /// Completes once a socket is established, at once if one already is, or
+  /// with the [ReverbException] that ended the cycle, which also ends the
+  /// hold ([ReverbCancelledException] when [closeAll] or [pause] came first).
+  /// Awaiting it is optional: an unawaited failure is not reported as
+  /// uncaught. While paused it fails with [ReverbCancelledException]; after
+  /// [dispose], with [ReverbConfigurationException].
+  Future<void> connect() {
+    if (_disposed) {
+      return _failedFuture(const ReverbConfigurationException('Client is disposed; cannot connect'));
+    }
+    if (_paused) {
+      return _failedFuture(const ReverbCancelledException('Client is paused; resume() first'));
+    }
+    _held = true;
+    // An idle socket waiting out its idle timeout is kept.
+    _idleTimer?.cancel();
+    _idleTimer = null;
+    if (_established) return Future<void>.value();
+
+    final connected = _waitForConnection();
+    if (!_cycleRunning) _startCycle(firstDelay: Duration.zero, reconnecting: false);
+    return connected;
   }
 
   /// Drops the socket and connects again at once, with a fresh set of
@@ -304,10 +345,10 @@ final class ReverbClient {
   /// [pause] or the release of the last channel came first). Awaiting it is
   /// optional: an unawaited failure is not reported as uncaught.
   ///
-  /// With no live channel and no open socket there is nothing to reconnect,
-  /// and it completes at once. While paused it fails with
-  /// [ReverbCancelledException] ([resume] reconnects); after [dispose], with
-  /// [ReverbConfigurationException].
+  /// With no live channel, no [connect] hold and no open socket there is
+  /// nothing to reconnect, and it completes at once. While paused it fails
+  /// with [ReverbCancelledException] ([resume] reconnects); after [dispose],
+  /// with [ReverbConfigurationException].
   Future<void> reconnect() {
     if (_disposed) {
       return _failedFuture(const ReverbConfigurationException('Client is disposed; cannot reconnect'));
@@ -315,7 +356,7 @@ final class ReverbClient {
     if (_paused) {
       return _failedFuture(const ReverbCancelledException('Client is paused; resume() reconnects'));
     }
-    if (_channels.isEmpty && _session == null && !_cycleRunning) return Future<void>.value();
+    if (_channels.isEmpty && !_held && _session == null && !_cycleRunning) return Future<void>.value();
 
     final connected = _waitForConnection();
     _log(ReverbLogLevel.info, 'reconnecting on request');
@@ -399,6 +440,8 @@ final class ReverbClient {
   void _onLastChannelGone() {
     _idleTimer?.cancel();
     _idleTimer = null;
+    // connect() keeps the socket for the subscription that will take it over.
+    if (_held) return;
 
     // A socket that is still connecting has nothing left to serve: abandon it.
     if (!_established || (options.closeWhenIdle && options.idleTimeout == Duration.zero)) {
@@ -410,7 +453,7 @@ final class ReverbClient {
 
     _idleTimer = Timer(options.idleTimeout, () {
       _idleTimer = null;
-      if (_channels.isEmpty) _closeSocket(const ReverbCancelledException('No channels left'));
+      if (_channels.isEmpty && !_held) _closeSocket(const ReverbCancelledException('No channels left'));
     });
   }
 
@@ -561,7 +604,7 @@ final class ReverbClient {
     _clearStaleAcks();
     _resetEntries(cause);
 
-    if (_channels.isEmpty) {
+    if (_channels.isEmpty && !_held) {
       _setState(ReverbConnectionState.disconnected);
       return;
     }
@@ -578,7 +621,7 @@ final class ReverbClient {
       ),
     );
     // The handler may have closed the client or released every channel.
-    if (epoch != _epoch || _channels.isEmpty) return;
+    if (epoch != _epoch || (_channels.isEmpty && !_held)) return;
 
     if (reconnect) {
       final backoff = cause is ReverbProtocolException && cause.requiresBackoff;
@@ -590,10 +633,12 @@ final class ReverbClient {
 
   /// The cycle ran out or hit a fatal failure: pending `ready` futures fail,
   /// every subscription becomes [ReverbSubscriptionStatus.failed], the socket
-  /// stays idle and live subscriptions stay open and silent. The next
-  /// [subscribe], or [reconnect], starts a new cycle.
+  /// stays idle and live subscriptions stay open and silent; a [connect] hold
+  /// ends with the failure its caller receives. The next [subscribe], or
+  /// [reconnect], starts a new cycle.
   void _onCycleExhausted(ReverbException failure, StackTrace? stackTrace) {
     _cycleRunning = false;
+    _held = false;
     _cycleTimer?.cancel();
     _cycleTimer = null;
     final fatal = failure is ReverbProtocolException && failure.isFatal;

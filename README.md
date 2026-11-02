@@ -293,6 +293,11 @@ Keep the host and public app key in your build configuration (for example `--dar
 Configure Reverb's `allowed_origins` to accept your app: native apps send no `Origin` unless you
 provide one; browsers supply their own origin.
 
+The socket opens with the first subscription. To open it earlier (for example right after sign-in,
+so a later screen only waits for its channel's authorization), call `reverb.connect()`. It completes
+once connected and keeps the socket open with no channel until a subscription takes it over;
+`closeAll()` ends that hold, and a failed connection ends it with the error `connect()` returns.
+
 #### Authorization request and response
 
 `HttpChannelAuthorizer` POSTs `socket_id` and the full `channel_name`, with JSON request encoding
@@ -743,6 +748,7 @@ request's cancellation token, expose the socket's close code/reason, and close a
 | `reverb.socketId` | Current socket id, or `null` without an established socket. Changes on reconnect. |
 | `reverb.channels` | Unmodifiable snapshot of channel names with live handles, including pending/failed ones. |
 | `reverb.pause()` / `resume()` | Close and keep handles / reconnect after an explicit pause. |
+| `reverb.connect()` | Open the socket before the first subscription and hold it open until one takes it over; completes once connected. |
 | `reverb.reconnect()` | Drop the socket and connect again at once, re-subscribing every live channel (failed ones included); completes once connected. |
 | `reverb.closeAll()` / `dispose()` | End every handle / permanently release the client as well. |
 | `subscription.channel` | Full wire channel name. |
