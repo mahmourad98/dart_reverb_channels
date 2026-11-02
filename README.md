@@ -23,6 +23,7 @@ This guide describes version **1.0.0**, matching [the `v1.0.0` tag](https://gith
 1. [Requirements](#requirements)
 2. [Installation](#installation)
 3. [Quick start](#quick-start)
+4. [Step-by-step integration](#step-by-step-integration)
 
 ## Requirements
 
@@ -97,3 +98,130 @@ Future<void> main() async {
 
 The socket opens on the first `subscribe` and closes when the last subscription is cancelled. You
 never call `connect()`.
+
+## Step-by-step integration
+
+### 1. Prepare the Laravel server
+
+Use [Laravel's Reverb installation](https://laravel.com/docs/12.x/broadcasting#reverb):
+
+```bash
+php artisan install:broadcasting --reverb
+```
+
+This writes the Reverb settings to `.env`. The client needs the public values:
+
+```dotenv
+BROADCAST_CONNECTION=reverb
+REVERB_APP_KEY=your-reverb-app-key
+REVERB_HOST=ws.example.com
+REVERB_PORT=443
+REVERB_SCHEME=https
+```
+
+Map `REVERB_APP_KEY` to `appKey`, `REVERB_HOST` to `host`, `REVERB_PORT` to `port` and
+`REVERB_SCHEME=https` to `useTls: true`. The host is a name or IP, without a scheme or path.
+The app needs a device-reachable address; Laravel may use a different internal address.
+
+`REVERB_APP_ID` and `REVERB_APP_SECRET` stay on the server. Never put the secret in the app.
+
+Run Reverb, and a queue worker when using a queued broadcast event, in separate terminals:
+
+```bash
+php artisan reverb:start
+```
+
+```bash
+php artisan queue:work
+```
+
+`REVERB_SERVER_HOST` / `REVERB_SERVER_PORT` control Reverb's listening address (by default
+`0.0.0.0:8080`); `REVERB_HOST` / `REVERB_PORT` tell Laravel where to publish. Production setups
+typically terminate TLS at a proxy on port 443 and forward WebSocket upgrades to Reverb.
+See [Reverb server configuration](https://laravel.com/docs/12.x/reverb#running-the-server).
+
+For a direct local connection, use `REVERB_SCHEME=http`, `REVERB_PORT=8080` and the Dart options
+`useTls: false, port: 8080`. See [Platform notes](#platform-notes) for device addresses.
+
+Private and presence channels need an authorization endpoint. With token-authenticated APIs
+(for example Sanctum), register the broadcasting routes behind your API guard. In Laravel 11+
+`bootstrap/app.php`:
+
+```php
+->withBroadcasting(
+    __DIR__.'/../routes/channels.php',
+    ['prefix' => 'api', 'middleware' => ['api', 'auth:sanctum']],
+)
+```
+
+Remove the `channels:` entry from `withRouting(...)` when using this `withBroadcasting(...)`
+setup, as shown in [Sanctum's broadcasting guide](https://laravel.com/docs/12.x/sanctum#authorizing-private-broadcast-channels).
+Sanctum must already be configured and the user signed in. This serves `POST /api/broadcasting/auth`.
+
+Declare who may join a channel in `routes/channels.php`:
+
+```php
+use Illuminate\Support\Facades\Broadcast;
+
+Broadcast::channel('users.{id}', function ($user, $id) {
+    return (int) $user->id === (int) $id;
+});
+```
+
+For user 7 the wire channel is `private-users.7`; substitute the id rather than sending `{id}`.
+Laravel adds prefixes for `PrivateChannel` / `PresenceChannel`; this client takes the full wire
+name and adds no channel prefix:
+
+| Laravel broadcast channel | Dart `subscribe` argument | Authorization |
+|---|---|---|
+| `new Channel('news')` | `'news'` | None |
+| `new PrivateChannel('users.7')` | `'private-users.7'` | Required |
+| `new PresenceChannel('chat.1')` | `'presence-chat.1'` | Required; returns member data |
+
+Channel names must be 1–200 characters, using only letters, digits and `_-=@,.;` (including `-`).
+`validateChannelName(name)` returns a reason when invalid, otherwise `null`.
+
+For example, create `app/Events/OrderShipped.php` (this assumes your app has an `Order` model):
+
+```php
+<?php
+
+namespace App\Events;
+
+use App\Models\Order;
+use Illuminate\Broadcasting\PrivateChannel;
+use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Queue\SerializesModels;
+
+class OrderShipped implements ShouldBroadcast
+{
+    use SerializesModels;
+
+    public function __construct(public Order $order) {}
+
+    public function broadcastOn(): array
+    {
+        return [new PrivateChannel('users.'.$this->order->user_id)];
+    }
+
+    public function broadcastAs(): string
+    {
+        return 'order.shipped';
+    }
+
+    public function broadcastWith(): array
+    {
+        return ['order_id' => $this->order->id];
+    }
+}
+```
+
+Dispatch it from your application after the order is shipped:
+
+```php
+event(new \App\Events\OrderShipped($order));
+```
+
+The subscriber `private-users.7` receives `order.shipped` with `{'order_id': ...}` when the
+order belongs to user 7. `ShouldBroadcast` queues the broadcast (unless your queue connection is
+synchronous); `ShouldBroadcastNow` sends synchronously. Listen before dispatching the event.
