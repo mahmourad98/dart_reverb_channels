@@ -1,3 +1,18 @@
+## 1.3.0
+
+- Every answer to a subscribe now reaches the subscribe it answers, which removes the trade-off
+  1.2.1 documented. The protocol has no request ids, so while a subscribe awaits its answer the
+  client sends a `pusher:ping` before its next subscribe or client event, and the server's in-order
+  replies tell the answers apart. As a result:
+  - a late answer to a subscribe released during its back-off no longer completes the `ready` of
+    the next subscription to that channel;
+  - a subscribe Reverb refuses without naming the channel (a bad signature) no longer holds up the
+    next subscription to that channel for about 11 s;
+  - a late refusal of a timed-out subscribe no longer fails its retry.
+- A released channel now unsubscribes whenever the server may still subscribe it, including while
+  its retry authorizes and after its attempts ran out by timeouts.
+- README: behaviour rule 9 explains the matching and its limit under Reverb's rate limiting.
+
 ## 1.2.1
 
 - A dropped socket now honors `ReverbOptions.retryIf`: when it refuses the cause (for example a TLS
