@@ -165,7 +165,8 @@ enum ReverbConnectionState {
   /// `ReverbClient.reconnect`.
   reconnecting,
 
-  /// The last cycle ran out of attempts. The next subscribe, or
+  /// The last cycle ran out of attempts, or `ReverbOptions.retryIf` refused
+  /// the failure that dropped the socket. The next subscribe, or
   /// `ReverbClient.reconnect`, starts a new one.
   unavailable,
 

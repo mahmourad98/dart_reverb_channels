@@ -185,11 +185,14 @@ final class ReverbOptions {
   /// The attempts one channel subscription gets on an established socket.
   final RetryPolicy subscribeRetry;
 
-  /// Overrides [ReverbException.isRetryable] for both policies.
+  /// Overrides [ReverbException.isRetryable] for both policies, and for
+  /// reconnecting after an established socket drops: a drop whose cause it
+  /// refuses ends the cycle instead.
   final ReverbRetryPredicate? retryIf;
 
   /// Whether a dropped socket with live channels starts a new connection
-  /// cycle and resubscribes them.
+  /// cycle and resubscribes them, when [retryIf] (or the cause's
+  /// [ReverbException.isRetryable]) allows it.
   final bool reconnect;
 
   /// The wait before the first reconnect attempt after a 4100–4199 close or

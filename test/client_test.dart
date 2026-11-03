@@ -405,6 +405,35 @@ void main() {
       });
     });
 
+    test('a drop whose cause retryIf refuses does not reconnect', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(
+          options: testOptions.copyWith(
+            retryIf: (ReverbException error) =>
+                !(error is ReverbConnectionException && error.rootCause is FakeNetworkError) && error.isRetryable,
+          ),
+        );
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        rig.connector.socket.emitError(const FakeNetworkError('bad record mac'));
+        async.elapse(const Duration(minutes: 5));
+
+        expect(rig.connector.requests, hasLength(1), reason: 'no reconnect attempt');
+        final drop = rig.reports.single;
+        expect(drop.stage, ReverbErrorStage.connection);
+        expect(drop.willRetry, isFalse);
+        expect(rig.client.state, ReverbConnectionState.unavailable);
+        expect(probe.subscription.status, ReverbSubscriptionStatus.failed);
+        expect(probe.subscription.error, same(drop.error));
+
+        // The app decides when to try again.
+        unawaited(rig.client.reconnect());
+        async.flushMicrotasks();
+        expect(probe.subscription.status, ReverbSubscriptionStatus.subscribed);
+      });
+    });
+
     test('pause closes the socket and keeps subscriptions; resume resubscribes them', () {
       fakeAsync((FakeAsync async) {
         final rig = ClientRig();

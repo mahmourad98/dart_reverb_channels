@@ -634,7 +634,9 @@ final class ReverbClient {
     }
 
     final fatal = cause is ReverbProtocolException && cause.isFatal;
-    final reconnect = options.reconnect && !fatal && !_paused;
+    // retryIf governs a drop like any connection attempt: a cause it refuses
+    // (a TLS failure, say) ends the cycle instead of reconnecting once.
+    final reconnect = options.reconnect && !fatal && !_paused && options.shouldRetry(cause);
     final epoch = _epoch;
     _report(
       ReverbErrorReport(

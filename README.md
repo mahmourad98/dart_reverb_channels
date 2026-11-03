@@ -706,7 +706,7 @@ The constructor validates options and can throw `ArgumentError` before any subsc
 | `subscriptionTimeout` | 10 s | One channel attempt: authorization and the server's acknowledgement. |
 | `connectRetry` | 3 attempts, 1 s then 2 s | Attempts per connection cycle, including the first. |
 | `subscribeRetry` | 3 attempts, 1 s then 2 s | Attempts per channel. |
-| `retryIf` | `error.isRetryable` | Decides which failures are retried. |
+| `retryIf` | `error.isRetryable` | Decides which failures are retried, including whether a dropped socket reconnects. |
 | `activityTimeout` | 120 s | The longest silence before a keep-alive ping; the server's shorter `activity_timeout` wins. |
 | `pongTimeout` | 30 s | How long a ping may go unanswered before the socket counts as dead. |
 | `reconnect` | `true` | Reconnect and re-subscribe after an open socket drops. |
@@ -805,7 +805,8 @@ Read it at request time, since it changes after reconnecting. The event must use
    already-failed `ready` remains failed.
 5. If an open socket drops, a new cycle starts at once (after `reconnectBackoff` for 4100–4199) and
    every live channel is re-subscribed with fresh authorization; its subscriptions read
-   `resubscribing` until then. Close codes 4000–4099 mean "do not reconnect".
+   `resubscribing` until then. Close codes 4000–4099 mean "do not reconnect", and so does a cause
+   `retryIf` refuses: subscriptions then read `failed` until `reconnect()` or the next `subscribe`.
 6. After `activity_timeout` of silence the client sends `pusher:ping`. No answer within
    `pongTimeout` counts as a drop. The `pinging` debug line is this keep-alive, not a problem.
 7. Events published while the socket is down are lost: Reverb does not replay them. If you must
