@@ -102,6 +102,29 @@ void main() {
       });
     });
 
+    test('cancelling one of two channels while connecting keeps the upgrade for the other', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig()..connector.hold = true;
+        final cancelled = Probe(rig.client.subscribe(_users));
+        final kept = Probe(rig.client.subscribe(_other));
+        async.flushMicrotasks();
+
+        unawaited(cancelled.subscription.cancel());
+        async.flushMicrotasks();
+        expect(rig.connector.pendingCount, 1);
+        expect(rig.connector.requests.single.cancelToken.isCancelled, isFalse);
+
+        rig.connector.completePending();
+        async.flushMicrotasks();
+        expect(rig.connector.sockets, hasLength(1));
+        expect(rig.subscribes(rig.connector.socket, _users), isEmpty);
+        expect(rig.subscribes(rig.connector.socket, _other), hasLength(1));
+        expect(kept.succeeded, isTrue);
+        expect(cancelled.readyError, isA<ReverbCancelledException>());
+        expect(rig.reports, isEmpty);
+      });
+    });
+
     test('cancel while the handshake is pending closes the socket without a subscribe frame', () {
       fakeAsync((FakeAsync async) {
         final rig = ClientRig(autoHandshake: false);
@@ -405,6 +428,19 @@ void main() {
       });
     });
 
+    test('a server ping without data, as Reverb sends it, is answered with a pong', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig();
+        Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        rig.connector.socket.emitRaw('{"event":"pusher:ping"}');
+        async.flushMicrotasks();
+        expect(rig.connector.socket.sentNamed(PusherEvents.pong), hasLength(1));
+        expect(rig.reports, isEmpty);
+      });
+    });
+
     test('a drop whose cause retryIf refuses does not reconnect', () {
       fakeAsync((FakeAsync async) {
         final rig = ClientRig(
@@ -554,6 +590,31 @@ void main() {
       });
     });
 
+    test('an error answering a released subscribe is drained, not applied to the new one', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(autoAcknowledge: false);
+        Probe(rig.client.subscribe(_other));
+        final first = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        rig.connector.socket.acknowledge(_other);
+        async.flushMicrotasks();
+
+        unawaited(first.subscription.cancel());
+        final second = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        expect(rig.subscribes(rig.connector.socket, _users), hasLength(2));
+
+        rig.connector.socket.refuse(_users, status: 403);
+        async.flushMicrotasks();
+        expect(second.readyDone, isFalse, reason: 'the refusal answers the released subscribe');
+        expect(rig.reports, isEmpty);
+
+        rig.connector.socket.acknowledge(_users);
+        async.flushMicrotasks();
+        expect(second.succeeded, isTrue);
+      });
+    });
+
     test('pusher:error on an established socket is reported and changes nothing', () {
       fakeAsync((FakeAsync async) {
         final rig = ClientRig();
@@ -568,6 +629,31 @@ void main() {
         rig.connector.socket.event(_users, 'order.shipped', '{"order_id":3}');
         async.flushMicrotasks();
         expect(probe.events.single.data, <String, dynamic>{'order_id': 3});
+      });
+    });
+
+    test('a no-channel 4009 answering a pending subscribe surfaces as that subscribe timing out', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(autoAcknowledge: false);
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        // Reverb answers a bad signature this way: no channel ties it to the subscribe.
+        rig.connector.socket.protocolError(4009, 'Invalid signature');
+        async.flushMicrotasks();
+        expect(rig.reports.single.stage, ReverbErrorStage.protocol);
+        expect(rig.reports.single.channel, isNull);
+        expect(probe.readyDone, isFalse);
+
+        async.elapse(const Duration(seconds: 10));
+        final timeout = rig.reports.last;
+        expect(timeout.stage, ReverbErrorStage.subscribe);
+        expect(timeout.channel, _users);
+        expect(timeout.error, isA<ReverbTimeoutException>());
+        expect(timeout.willRetry, isTrue);
+
+        async.elapse(const Duration(seconds: 1));
+        expect(rig.subscribes(rig.connector.socket, _users), hasLength(2), reason: 'retried on the same socket');
       });
     });
 
