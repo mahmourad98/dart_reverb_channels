@@ -1,3 +1,13 @@
+## 1.2.1
+
+- A dropped socket now honors `ReverbOptions.retryIf`: when it refuses the cause (for example a TLS
+  failure on an established socket), the client no longer reconnects once anyway. The drop is
+  reported with `willRetry: false`, subscriptions read `failed` and `reconnect()` brings them back.
+  With the default `retryIf` nothing changes: every cause of a drop is retryable.
+- Tests for four cases the suite did not cover: a server ping without `data` (the frame Reverb
+  sends), cancelling one of two channels while connecting, an error answering a released subscribe,
+  and a no-channel 4009 answering a pending subscribe.
+
 ## 1.2.0
 
 - `ReverbClient.connect()`: opens the socket before the first subscription and keeps it open with

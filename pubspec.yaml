@@ -3,7 +3,7 @@ description: >-
   A Pusher-protocol channels client for Laravel Reverb: shared,
   reference-counted subscriptions, bounded retries, automatic reconnect and
   resubscribe, and pluggable transport, authorization, decryption and logging.
-version: 1.2.0
+version: 1.2.1
 homepage: https://github.com/mahmourad98/dart_reverb_channels
 repository: https://github.com/mahmourad98/dart_reverb_channels
 issue_tracker: https://github.com/mahmourad98/dart_reverb_channels/issues

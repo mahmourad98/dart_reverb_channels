@@ -5,7 +5,7 @@ import 'exceptions.dart';
 
 /// This package's version, sent as the socket URL's `version` query parameter.
 /// Kept equal to `pubspec.yaml`'s `version` (a test checks it).
-const String dartReverbChannelsVersion = '1.2.0';
+const String dartReverbChannelsVersion = '1.2.1';
 
 /// Builds headers on demand, so a value that changes between attempts (a
 /// refreshed token, a rotated origin) is read fresh every time.
