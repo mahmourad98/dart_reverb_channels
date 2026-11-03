@@ -490,10 +490,10 @@ final class ReverbClient {
     entry.stopAttempt(const ReverbCancelledException('Channel released'));
 
     final session = _session;
-    if (_established && session != null) {
-      if (status == _EntryStatus.acknowledging || status == _EntryStatus.subscribed || status == _EntryStatus.backoff) {
-        session.send(PusherEvents.unsubscribe, data: <String, Object?>{'channel': entry.name});
-      }
+    // The server may still subscribe the socket on a frame it has not answered.
+    final unanswered = _unanswered[entry.name]?.any((_SubscribeFrame frame) => identical(frame.entry, entry)) ?? false;
+    if (_established && session != null && (status == _EntryStatus.subscribed || unanswered)) {
+      session.send(PusherEvents.unsubscribe, data: <String, Object?>{'channel': entry.name});
     }
     _log(ReverbLogLevel.debug, 'channel ${entry.name} (generation ${entry.generation}) released');
   }

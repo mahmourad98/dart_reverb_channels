@@ -790,6 +790,28 @@ void main() {
       });
     });
 
+    test('a channel released while its retry authorizes unsubscribes the timed-out subscribe', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(autoAcknowledge: false);
+        Probe(rig.client.subscribe(_other));
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        rig.connector.socket.acknowledge(_other);
+        async.elapse(const Duration(seconds: 10));
+        rig.authorizer.hold = true;
+        async.elapse(const Duration(seconds: 1));
+        expect(rig.authorizer.pendingCount, 1, reason: 'the retry is authorizing');
+
+        unawaited(probe.subscription.cancel());
+        async.flushMicrotasks();
+        expect(
+          rig.unsubscribes(rig.connector.socket, _users),
+          hasLength(1),
+          reason: 'the server may still subscribe it',
+        );
+      });
+    });
+
     test('pusher:error on an established socket is reported and changes nothing', () {
       fakeAsync((FakeAsync async) {
         final rig = ClientRig();
