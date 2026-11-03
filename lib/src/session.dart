@@ -17,6 +17,7 @@ final class ReverbSession {
     required Duration pongTimeout,
     required void Function(PusherFrame frame) onFrame,
     required void Function(ReverbException error, StackTrace? stackTrace, ReverbErrorStage stage) onError,
+    void Function(int ping)? onPong,
     void Function(ReverbLogLevel level, String message)? onLog,
   }) : _connector = connector,
        _request = request,
@@ -24,6 +25,7 @@ final class ReverbSession {
        _pongTimeout = pongTimeout,
        _onFrame = onFrame,
        _onError = onError,
+       _onPong = onPong,
        _onLog = onLog {
     // A handshake that fails while nobody awaits it yet (the deadline firing
     // during the upgrade) must not surface as an uncaught error; [open]'s
@@ -37,6 +39,7 @@ final class ReverbSession {
   final Duration _pongTimeout;
   final void Function(PusherFrame frame) _onFrame;
   final void Function(ReverbException error, StackTrace? stackTrace, ReverbErrorStage stage) _onError;
+  final void Function(int ping)? _onPong;
   final void Function(ReverbLogLevel level, String message)? _onLog;
 
   final Completer<String> _handshake = Completer<String>();
@@ -49,6 +52,11 @@ final class ReverbSession {
   Duration _activityTimeout = const Duration(seconds: 120);
   String? _socketId;
   bool _terminated = false;
+  int _pingsSent = 0;
+  int _pongsReceived = 0;
+
+  /// The pings sent on this socket so far, by the keep-alive or [ping].
+  int get pingsSent => _pingsSent;
 
   /// The server-assigned socket id, once established.
   String? get socketId => _socketId;
@@ -116,6 +124,16 @@ final class ReverbSession {
     }
   }
 
+  /// Sends `pusher:ping`. A no-op unless the socket is established.
+  ///
+  /// The server handles a socket's frames in order and answers every ping
+  /// with one `pusher:pong`, so a pong follows every immediate reply to the
+  /// frames sent before its ping. `onPong` reports each pong with the number
+  /// of the ping it answers: the [pingsSent] count right after it.
+  void ping() {
+    if (isEstablished && _sendRaw(PusherEvents.ping, data: const <String, Object?>{})) _pingsSent++;
+  }
+
   /// Closes the socket from this side. A pending [open] fails with
   /// [ReverbCancelledException]; [dropped] completes with one.
   Future<void> close() async {
@@ -143,7 +161,8 @@ final class ReverbSession {
       case PusherEvents.ping:
         _sendRaw(PusherEvents.pong, data: const <String, Object?>{});
       case PusherEvents.pong:
-        break;
+        // Pongs answer pings in order; one with no ping waiting is ignored.
+        if (_pongsReceived < _pingsSent) _onPong?.call(++_pongsReceived);
       case PusherEvents.error:
         _onProtocolError(frame);
       default:
@@ -228,7 +247,7 @@ final class ReverbSession {
   void _ping() {
     if (!isEstablished) return;
     _log(ReverbLogLevel.debug, 'no frame for ${_activityTimeout.inSeconds}s, pinging');
-    _sendRaw(PusherEvents.ping, data: const <String, Object?>{});
+    ping();
     _pongTimer?.cancel();
     _pongTimer = Timer(_pongTimeout, () {
       _terminate(
@@ -238,13 +257,16 @@ final class ReverbSession {
     });
   }
 
-  void _sendRaw(String event, {Object? data}) {
+  /// Whether the frame went out.
+  bool _sendRaw(String event, {Object? data}) {
     final socket = _socket;
-    if (socket == null || _terminated) return;
+    if (socket == null || _terminated) return false;
     try {
       socket.add(encodePusherFrame(event, data: data));
+      return true;
     } catch (error) {
       _log(ReverbLogLevel.warning, 'send $event failed: $error');
+      return false;
     }
   }
 
