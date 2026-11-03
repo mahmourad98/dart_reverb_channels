@@ -57,6 +57,36 @@ final class _ChannelAttempt {
   }
 }
 
+/// A `pusher:subscribe` frame the server has not answered yet.
+///
+/// An answer (`pusher_internal:subscription_succeeded` or
+/// `pusher:subscription_error`) names its channel and nothing else, so two
+/// unanswered subscribes of one name, from a channel released and subscribed
+/// again or from a retry after a timeout, cannot be told apart by their
+/// answers. Order tells them apart. The server handles a socket's frames one
+/// at a time and answers each `pusher:ping` with one `pusher:pong`. A
+/// subscribe it accepts is answered by name, at once or, for a presence
+/// channel on a Reverb that scales across servers, later but in order. One
+/// it refuses (Reverb: a bad signature) draws at once a `pusher:error` that
+/// names no channel and is never answered by name. So:
+///
+/// - An answer belongs to the oldest unanswered subscribe of its name.
+/// - Pings cut the frames into stretches, and an unanswered subscribe never
+///   shares its stretch with another frame that can draw an error (a
+///   subscribe or a client event): one goes out after a ping instead.
+/// - The pong that closes a stretch follows every immediate reply to it. If
+///   a `pusher:error` came since the previous pong, the stretch's unanswered
+///   subscribe was refused; if none came, its answer is still on its way.
+final class _SubscribeFrame {
+  _SubscribeFrame(this.entry, this.attempt, this.pingsBefore);
+
+  final _ChannelEntry entry;
+  final _ChannelAttempt attempt;
+
+  /// The pings the socket had sent before this frame.
+  final int pingsBefore;
+}
+
 /// A channel's shared state: its subscribers and its wire subscription.
 ///
 /// A channel whose last subscriber leaves is removed; a later subscribe to the
@@ -175,8 +205,16 @@ final class ReverbClient {
 
   final StreamController<ReverbConnectionState> _states = StreamController<ReverbConnectionState>.broadcast();
   final Map<String, _ChannelEntry> _channels = <String, _ChannelEntry>{};
-  final Map<String, int> _staleAcks = <String, int>{};
-  final List<Timer> _staleAckTimers = <Timer>[];
+
+  /// The current socket's unanswered subscribe frames per channel name, oldest
+  /// first.
+  final Map<String, List<_SubscribeFrame>> _unanswered = <String, List<_SubscribeFrame>>{};
+
+  /// `pusher:error`s since the last pong.
+  int _errorsSincePong = 0;
+
+  /// The socket's ping count when the last client event went out.
+  int _whisperedAt = -1;
 
   ReverbConnectionState _state = ReverbConnectionState.disconnected;
   int _epoch = 0;
@@ -453,10 +491,6 @@ final class ReverbClient {
 
     final session = _session;
     if (_established && session != null) {
-      // Only a subscribe still awaiting its answer leaves a slot. One released
-      // during the back-off after a timed-out subscribe leaves none on
-      // purpose; _addStaleAck explains the trade-off.
-      if (status == _EntryStatus.acknowledging) _addStaleAck(entry.name);
       if (status == _EntryStatus.acknowledging || status == _EntryStatus.subscribed || status == _EntryStatus.backoff) {
         session.send(PusherEvents.unsubscribe, data: <String, Object?>{'channel': entry.name});
       }
@@ -493,7 +527,10 @@ final class ReverbClient {
     final session = _session;
     if (!_established || session == null || entry.status != _EntryStatus.subscribed) return false;
     final name = event.startsWith(PusherEvents.clientEventPrefix) ? event : '${PusherEvents.clientEventPrefix}$event';
+    // Its error must not pass for a subscribe's refusal; see _SubscribeFrame.
+    if (_unansweredSince(session.pingsSent)) session.ping();
     session.send(name, data: data, channel: entry.name);
+    _whisperedAt = session.pingsSent;
     return true;
   }
 
@@ -552,8 +589,10 @@ final class ReverbClient {
         activityTimeout: options.activityTimeout,
         pongTimeout: options.pongTimeout,
         onFrame: (PusherFrame frame) => _onFrame(session, frame),
+        onPong: (int ping) => _onPong(session, ping),
         onError: (ReverbException error, StackTrace? stackTrace, ReverbErrorStage stage) {
           if (identical(_session, session)) {
+            if (stage == ReverbErrorStage.protocol) _errorsSincePong++;
             _report(ReverbErrorReport(error: error, stage: stage, stackTrace: stackTrace));
           }
         },
@@ -612,7 +651,7 @@ final class ReverbClient {
     _cycleAttempt = 0;
     _connectToken = null;
     _connectDeadline = null;
-    _clearStaleAcks();
+    _forgetFrames();
     _setState(ReverbConnectionState.connected);
     _settleConnectWaiters();
 
@@ -628,7 +667,7 @@ final class ReverbClient {
     if (!identical(session, _session) || !_established) return;
     _session = null;
     _established = false;
-    _clearStaleAcks();
+    _forgetFrames();
     _resetEntries(cause);
 
     if (_channels.isEmpty && !_held) {
@@ -698,7 +737,7 @@ final class ReverbClient {
     final session = _session;
     _session = null;
     _established = false;
-    _clearStaleAcks();
+    _forgetFrames();
     if (session != null) unawaited(session.close());
 
     _resetEntries(reason);
@@ -824,7 +863,10 @@ final class ReverbClient {
     entry.sharedSecret = authorization?.sharedSecret;
     entry.channelData = authorization?.channelData;
     entry.setStatus(_EntryStatus.acknowledging);
-    _session!.send(
+    final session = _session!;
+    // An unanswered subscribe keeps its stretch to itself; see _SubscribeFrame.
+    if (_whisperedAt == session.pingsSent || _unansweredSince(session.pingsSent)) session.ping();
+    session.send(
       PusherEvents.subscribe,
       data: <String, Object?>{
         'channel': entry.name,
@@ -832,6 +874,7 @@ final class ReverbClient {
         'channel_data': ?authorization?.channelData,
       },
     );
+    (_unanswered[entry.name] ??= <_SubscribeFrame>[]).add(_SubscribeFrame(entry, attempt, session.pingsSent));
   }
 
   bool _isCurrent(_ChannelEntry entry, _ChannelAttempt attempt) {
@@ -930,10 +973,47 @@ final class ReverbClient {
     if (!_events.isClosed) _events.add(event);
   }
 
+  /// The oldest unanswered subscribe frame of [name]: the one an answer naming
+  /// [name] answers. See [_SubscribeFrame].
+  _SubscribeFrame? _takeAnswered(String name) {
+    final unanswered = _unanswered[name];
+    if (unanswered == null || unanswered.isEmpty) return null;
+    final frame = unanswered.removeAt(0);
+    if (unanswered.isEmpty) _unanswered.remove(name);
+    return frame;
+  }
+
+  /// Whether a subscribe sent since the socket's ping number [pings] is
+  /// unanswered.
+  bool _unansweredSince(int pings) =>
+      _unanswered.values.any((List<_SubscribeFrame> unanswered) => unanswered.last.pingsBefore == pings);
+
+  /// The pong of [ping] closes the stretch of frames sent before it: an error
+  /// since the previous pong refused that stretch's unanswered subscribe.
+  void _onPong(ReverbSession? session, int ping) {
+    if (session == null || !identical(session, _session) || !_established) return;
+    final refused = _errorsSincePong > 0;
+    _errorsSincePong = 0;
+    if (!refused) return;
+    _unanswered.removeWhere((String name, List<_SubscribeFrame> unanswered) {
+      unanswered.removeWhere((_SubscribeFrame frame) => frame.pingsBefore == ping - 1);
+      return unanswered.isEmpty;
+    });
+  }
+
+  /// Forgets the frames of a socket that ended or never carried any.
+  void _forgetFrames() {
+    _unanswered.clear();
+    _errorsSincePong = 0;
+    _whisperedAt = -1;
+  }
+
   void _onSubscriptionSucceeded(String name, PusherFrame frame) {
-    if (_consumeStaleAck(name)) return;
+    final answered = _takeAnswered(name);
     final entry = _channels[name];
-    if (entry == null) return;
+    // An answer to a released entry's frame is followed by that entry's
+    // unsubscribe, and is no answer to a newer entry of the same name.
+    if (answered == null || entry == null || !identical(answered.entry, entry)) return;
 
     if (entry.status == _EntryStatus.failed) {
       // A late answer to an attempt the client already gave up on: the server
@@ -942,9 +1022,10 @@ final class ReverbClient {
       _session?.send(PusherEvents.unsubscribe, data: <String, Object?>{'channel': name});
       return;
     }
-    // A late answer to a timed-out attempt (backoff) is as good as the retry's.
-    if (entry.status != _EntryStatus.acknowledging && entry.status != _EntryStatus.backoff) return;
+    if (entry.status == _EntryStatus.subscribed) return;
 
+    // Any of the entry's frames subscribes the socket: a timed-out attempt's
+    // late answer is as good as the retry's.
     entry.stopAttempt(const ReverbCancelledException('Acknowledged'));
     entry.attempts = 0;
     if (entry.kind == ReverbChannelKind.presence) _seedPresence(entry, frame.decodedData);
@@ -954,10 +1035,17 @@ final class ReverbClient {
   }
 
   void _onSubscriptionError(String name, PusherFrame frame) {
-    if (_consumeStaleAck(name)) return;
+    final answered = _takeAnswered(name);
     final entry = _channels[name];
-    final attempt = entry?.current;
-    if (entry == null || attempt == null || entry.status != _EntryStatus.acknowledging) return;
+    // Only the running attempt's own frame can fail it.
+    if (answered == null ||
+        entry == null ||
+        !identical(answered.entry, entry) ||
+        !identical(answered.attempt, entry.current) ||
+        entry.status != _EntryStatus.acknowledging) {
+      return;
+    }
+    final attempt = answered.attempt;
 
     final data = frame.decodedData;
     final status = readPusherInt(data['status']);
@@ -1062,68 +1150,6 @@ final class ReverbClient {
         rawData: frame.data,
       ),
     );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Stale acknowledgements
-  // ---------------------------------------------------------------------------
-
-  /// A channel released while its `pusher:subscribe` was unacknowledged leaves
-  /// one slot: the answer to that frame is drained before a new entry of the
-  /// same name can take an acknowledgement. Slots expire after the
-  /// subscription timeout, so a frame the server never answers cannot starve
-  /// the name.
-  ///
-  /// The protocol does not say which subscribe an answer belongs to, so a
-  /// slot is a guess, and its two failure modes pull against each other:
-  ///
-  /// - A slot for a subscribe the server never answers swallows the next
-  ///   entry's answer. Reverb answers a bad signature that way, with a
-  ///   `pusher:error` 4009 that names no channel. The new entry then waits for
-  ///   its attempt to time out and retry: one subscription timeout plus the
-  ///   back-off, about 11 s with the defaults.
-  /// - No slot for a subscribe that is answered late lets that answer
-  ///   complete the next entry's `ready` a few milliseconds before the server
-  ///   processes the new subscribe.
-  ///
-  /// So a slot is added only while an answer is expected (the entry is
-  /// acknowledging), not for a channel released during the back-off after a
-  /// timed-out subscribe. After a whole subscription timeout without an
-  /// answer, no answer is the likelier outcome, and a late one costs
-  /// milliseconds where a wrong slot costs seconds. Both cases need a rare
-  /// sequence of events.
-  void _addStaleAck(String name) {
-    _staleAcks[name] = (_staleAcks[name] ?? 0) + 1;
-    late final Timer timer;
-    timer = Timer(options.subscriptionTimeout, () {
-      _staleAckTimers.remove(timer);
-      final count = _staleAcks[name] ?? 0;
-      if (count <= 1) {
-        _staleAcks.remove(name);
-      } else {
-        _staleAcks[name] = count - 1;
-      }
-    });
-    _staleAckTimers.add(timer);
-  }
-
-  bool _consumeStaleAck(String name) {
-    final count = _staleAcks[name] ?? 0;
-    if (count == 0) return false;
-    if (count == 1) {
-      _staleAcks.remove(name);
-    } else {
-      _staleAcks[name] = count - 1;
-    }
-    return true;
-  }
-
-  void _clearStaleAcks() {
-    for (final timer in _staleAckTimers) {
-      timer.cancel();
-    }
-    _staleAckTimers.clear();
-    _staleAcks.clear();
   }
 
   // ---------------------------------------------------------------------------

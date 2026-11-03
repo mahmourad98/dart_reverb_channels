@@ -615,6 +615,181 @@ void main() {
       });
     });
 
+    test('a late answer to a subscribe released during its back-off is not taken for the next one', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(autoAcknowledge: false);
+        Probe(rig.client.subscribe(_other));
+        async.flushMicrotasks();
+        final socket = rig.connector.socket..acknowledge(_other);
+        async.flushMicrotasks();
+        final first = Probe(rig.client.subscribe(_users));
+        async.elapse(const Duration(seconds: 10));
+        expect(rig.reports.single.error, isA<ReverbTimeoutException>(), reason: 'now in its back-off');
+
+        unawaited(first.subscription.cancel());
+        final second = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        // A slow server still answers in order: the first subscribe, the ping, the second subscribe.
+        socket.acknowledge(_users);
+        async.flushMicrotasks();
+        expect(second.readyDone, isFalse, reason: 'the late answer belongs to the released subscribe');
+
+        socket
+          ..emit(<String, Object?>{'event': PusherEvents.pong})
+          ..acknowledge(_users);
+        async.flushMicrotasks();
+        expect(second.succeeded, isTrue);
+        expect(
+          socket.sent.reversed.take(3).map((Map<String, dynamic> f) => f['event']),
+          <String>[PusherEvents.subscribe, PusherEvents.ping, PusherEvents.unsubscribe],
+          reason: 'a ping separates the two subscribes',
+        );
+      });
+    });
+
+    test('a subscribe refused without a channel name does not hold up the next one', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(autoAcknowledge: false);
+        Probe(rig.client.subscribe(_other));
+        async.flushMicrotasks();
+        final socket = rig.connector.socket..acknowledge(_other);
+        async.flushMicrotasks();
+        final first = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        // Reverb refuses a bad signature at once, with a 4009 that names no channel.
+        socket.protocolError(4009, 'Invalid signature');
+        async.flushMicrotasks();
+
+        unawaited(first.subscription.cancel());
+        final second = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+
+        socket
+          ..emit(<String, Object?>{'event': PusherEvents.pong})
+          ..acknowledge(_users);
+        async.flushMicrotasks();
+        expect(second.succeeded, isTrue, reason: 'no wait for a timeout');
+      });
+    });
+
+    test('a refusal answering a timed-out subscribe is not taken for its retry', () {
+      fakeAsync((FakeAsync async) {
+        final rig = ClientRig(autoAcknowledge: false);
+        final probe = Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 11));
+        final socket = rig.connector.socket;
+        expect(rig.subscribes(socket, _users), hasLength(2));
+
+        socket.refuse(_users, status: 403);
+        async.flushMicrotasks();
+        expect(probe.readyDone, isFalse, reason: 'the refusal answers the first, timed-out subscribe');
+
+        socket
+          ..emit(<String, Object?>{'event': PusherEvents.pong})
+          ..acknowledge(_users);
+        async.flushMicrotasks();
+        expect(probe.succeeded, isTrue);
+      });
+    });
+
+    // Reverb, when scaling across servers, answers a presence subscribe once every server reported its
+    // members: after the pongs of pings sent later, but in order.
+    test('a presence answer that comes after a later pong is not taken for the next subscribe', () {
+      fakeAsync((FakeAsync async) {
+        const room = 'presence-room.1';
+        final rig = ClientRig(autoAcknowledge: false);
+        Probe(rig.client.subscribe(_other));
+        async.flushMicrotasks();
+        final socket = rig.connector.socket..acknowledge(_other);
+        async.flushMicrotasks();
+        final first = Probe(rig.client.subscribe(room));
+        async.flushMicrotasks();
+        unawaited(first.subscription.cancel());
+        final second = Probe(rig.client.subscribe(room));
+        async.flushMicrotasks();
+
+        socket
+          ..emit(<String, Object?>{'event': PusherEvents.pong})
+          ..acknowledge(room);
+        async.flushMicrotasks();
+        expect(second.readyDone, isFalse, reason: 'the answer belongs to the released subscribe');
+
+        socket.acknowledge(room);
+        async.flushMicrotasks();
+        expect(second.succeeded, isTrue);
+      });
+    });
+
+    test('a presence answer that comes after a later pong subscribes its channel', () {
+      fakeAsync((FakeAsync async) {
+        const room = 'presence-room.1';
+        final rig = ClientRig(autoAcknowledge: false);
+        final probe = Probe(rig.client.subscribe(room));
+        async.flushMicrotasks();
+        Probe(rig.client.subscribe(_other));
+        async.flushMicrotasks();
+
+        rig.connector.socket
+          ..emit(<String, Object?>{'event': PusherEvents.pong})
+          ..acknowledge(_other)
+          ..acknowledge(room);
+        async.flushMicrotasks();
+        expect(probe.succeeded, isTrue);
+      });
+    });
+
+    test('an error settles only the subscribe sent between the pings around it', () {
+      fakeAsync((FakeAsync async) {
+        const room = 'presence-room.1';
+        final rig = ClientRig(autoAcknowledge: false);
+        Probe(rig.client.subscribe(_users));
+        async.flushMicrotasks();
+        final socket = rig.connector.socket..protocolError(4009, 'Invalid signature');
+        async.flushMicrotasks();
+        final probe = Probe(rig.client.subscribe(room));
+        async.flushMicrotasks();
+        Probe(rig.client.subscribe(_other));
+        async.flushMicrotasks();
+
+        socket
+          ..emit(<String, Object?>{'event': PusherEvents.pong})
+          ..emit(<String, Object?>{'event': PusherEvents.pong})
+          ..acknowledge(_other)
+          ..acknowledge(room);
+        async.flushMicrotasks();
+        expect(probe.succeeded, isTrue, reason: "the refusal was the first subscribe's");
+      });
+    });
+
+    test("a client event's error is not taken for a pending subscribe's refusal", () {
+      fakeAsync((FakeAsync async) {
+        const room = 'presence-room.1';
+        final rig = ClientRig(autoAcknowledge: false);
+        final users = rig.client.subscribe(_users);
+        async.flushMicrotasks();
+        final socket = rig.connector.socket..acknowledge(_users);
+        async.flushMicrotasks();
+        final probe = Probe(rig.client.subscribe(room));
+        async.flushMicrotasks();
+
+        expect(users.trigger('typing'), isTrue);
+        Probe(rig.client.subscribe(_other));
+        async.flushMicrotasks();
+
+        // Reverb refuses a whisper from a client it does not count as a member.
+        socket
+          ..emit(<String, Object?>{'event': PusherEvents.pong})
+          ..protocolError(4009, 'The client is not a member of the specified channel.')
+          ..emit(<String, Object?>{'event': PusherEvents.pong})
+          ..acknowledge(_other)
+          ..acknowledge(room);
+        async.flushMicrotasks();
+        expect(probe.succeeded, isTrue);
+      });
+    });
+
     test('pusher:error on an established socket is reported and changes nothing', () {
       fakeAsync((FakeAsync async) {
         final rig = ClientRig();
