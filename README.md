@@ -815,6 +815,13 @@ Read it at request time, since it changes after reconnecting. The event must use
    wait with a timeout.
 8. `cancel`, `closeAll` and a new socket make any work still in flight for the old state (an
    authorization request, a late acknowledgement, a retry timer) do nothing.
+9. Every answer to a subscribe reaches the subscribe it answers, even when a channel is released
+   and subscribed again before the first answer. The protocol has no request ids, so while a
+   subscribe awaits its answer, the client sends a `pusher:ping` before its next subscribe or
+   client event; the server replies in order, and the pong marks which answers came first. This
+   relies on the server handling a socket's frames one at a time, as Reverb does. Under Reverb's
+   rate limiting (off by default), frames over the limit are dropped and an answer can again be
+   matched to the wrong subscribe.
 
 ## Errors
 
