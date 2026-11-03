@@ -453,6 +453,9 @@ final class ReverbClient {
 
     final session = _session;
     if (_established && session != null) {
+      // Only a subscribe still awaiting its answer leaves a slot. One released
+      // during the back-off after a timed-out subscribe leaves none on
+      // purpose; _addStaleAck explains the trade-off.
       if (status == _EntryStatus.acknowledging) _addStaleAck(entry.name);
       if (status == _EntryStatus.acknowledging || status == _EntryStatus.subscribed || status == _EntryStatus.backoff) {
         session.send(PusherEvents.unsubscribe, data: <String, Object?>{'channel': entry.name});
@@ -1070,6 +1073,25 @@ final class ReverbClient {
   /// same name can take an acknowledgement. Slots expire after the
   /// subscription timeout, so a frame the server never answers cannot starve
   /// the name.
+  ///
+  /// The protocol does not say which subscribe an answer belongs to, so a
+  /// slot is a guess, and its two failure modes pull against each other:
+  ///
+  /// - A slot for a subscribe the server never answers swallows the next
+  ///   entry's answer. Reverb answers a bad signature that way, with a
+  ///   `pusher:error` 4009 that names no channel. The new entry then waits for
+  ///   its attempt to time out and retry: one subscription timeout plus the
+  ///   back-off, about 11 s with the defaults.
+  /// - No slot for a subscribe that is answered late lets that answer
+  ///   complete the next entry's `ready` a few milliseconds before the server
+  ///   processes the new subscribe.
+  ///
+  /// So a slot is added only while an answer is expected (the entry is
+  /// acknowledging), not for a channel released during the back-off after a
+  /// timed-out subscribe. After a whole subscription timeout without an
+  /// answer, no answer is the likelier outcome, and a late one costs
+  /// milliseconds where a wrong slot costs seconds. Both cases need a rare
+  /// sequence of events.
   void _addStaleAck(String name) {
     _staleAcks[name] = (_staleAcks[name] ?? 0) + 1;
     late final Timer timer;
